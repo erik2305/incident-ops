@@ -15,5 +15,35 @@ services:
       timeout: 5s
       retries: 30
 
+  inventory:
+    build:
+      context: ./services
+      args:
+        SERVICE: inventory
+    ports:
+      - "127.0.0.1:8001:8000"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/__ops/health', timeout=2)"]
+      interval: 2s
+      timeout: 5s
+      retries: 30
+  checkout:
+    build:
+      context: ./services
+      args:
+        SERVICE: checkout
+    environment:
+      INVENTORY_BASE_URL: http://inventory:8000
+    ports:
+      - "127.0.0.1:8002:8000"
+    depends_on:
+      inventory:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/__ops/health', timeout=2)"]
+      interval: 2s
+      timeout: 5s
+      retries: 30
+
 volumes:
   postgres_data:
