@@ -23,6 +23,9 @@ def test_invalid_essential_configuration_fails_before_startup(url):
     [
         ("health", httpx.Response(200, content=b"not JSON")),
         ("health", httpx.Response(200, json={})),
+        ("probe", httpx.Response(200, content=b"not JSON")),
+        ("probe", httpx.Response(200, json={})),
+        ("probe", httpx.Response(503, json={"detail": "Probe inventory unavailable"})),
         (
             "metrics",
             httpx.Response(200, json={"requests_total": True, "requests_5xx": 0}),
@@ -48,7 +51,8 @@ def test_invalid_upstream_response_is_a_tool_error(endpoint, response):
     asyncio.run(verify())
 
 
-def test_timeout_is_a_tool_error():
+@pytest.mark.parametrize("endpoint", ["metrics", "probe"])
+def test_timeout_is_a_tool_error(endpoint):
     def timeout(request):
         raise httpx.ReadTimeout("internal exception details", request=request)
 
@@ -56,7 +60,7 @@ def test_timeout_is_a_tool_error():
         async with httpx.AsyncClient(transport=httpx.MockTransport(timeout)) as client:
             backend = HTTPBackend(client, {"checkout": "http://checkout"})
             with pytest.raises(ToolError, match="timed out") as error:
-                await backend.read("checkout", "metrics")
+                await backend.read("checkout", endpoint)
             assert "internal exception details" not in str(error.value)
 
     asyncio.run(verify())

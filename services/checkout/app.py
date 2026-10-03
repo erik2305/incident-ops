@@ -88,11 +88,66 @@ def failure(state, status, message, event, version, sku, **fields):
     return JSONResponse({"detail": message}, status_code=status)
 
 
+async def calculate_checkout(state, payload, version, *, observational=False):
+    """Shared business calculation; callers decide whether to record traffic."""
+    path = "/__ops/probe-stock" if observational else f"/inventory/{payload.sku}"
+    try:
+        response = await state.inventory.get(path)
+        response.raise_for_status()
+    except httpx.RequestError as error:
+        return (
+            502,
+            "Inventory request failed",
+            "downstream_error",
+            {"error_type": type(error).__name__},
+        )
+    except httpx.HTTPStatusError as error:
+        status = 404 if error.response.status_code == 404 else 502
+        return (
+            status,
+            "Inventory response unsuccessful",
+            "downstream_error",
+            {"downstream_status": error.response.status_code},
+        )
+    try:
+        stock = response.json()
+        if (
+            type(stock) is not dict
+            or type(stock.get("available")) is not int
+            or type(stock.get("unit_price_cents")) is not int
+        ):
+            raise ValueError("Invalid inventory contract")
+    except ValueError:
+        return 502, "Inventory response invalid", "downstream_error", {}
+    if stock["available"] < payload.quantity:
+        return 409, "Insufficient inventory", "checkout_rejected", {}
+    try:
+        # v2's actual defect runs here for ordinary requests AND probes.
+        price_field = "unit_price_cents" if version == "v1" else "unit_price"
+        total_cents = stock[price_field] * payload.quantity
+    except KeyError as error:
+        return (
+            500,
+            "Checkout calculation failed",
+            "checkout_error",
+            {"error_type": type(error).__name__},
+        )
+    return (
+        200,
+        "Checkout completed",
+        "checkout_completed",
+        {
+            "sku": payload.sku,
+            "quantity": payload.quantity,
+            "total_cents": total_cents,
+            "version": version,
+        },
+    )
+
+
 @app.post("/checkout")
 async def checkout(payload: CheckoutInput, request: Request):
     state = request.app.state
-    # Serialize this small environment's business/control operations so reset
-    # cannot erase counters mid-request and deployment changes apply atomically.
     async with state.lock:
         version = state.active_version
         state.requests_total += 1
@@ -104,72 +159,36 @@ async def checkout(payload: CheckoutInput, request: Request):
             version=version,
             sku=payload.sku,
         )
-        try:
-            response = await state.inventory.get(f"/inventory/{payload.sku}")
-            response.raise_for_status()
-        except httpx.RequestError as error:
-            return failure(
-                state,
-                502,
-                "Inventory request failed",
-                "downstream_error",
-                version,
-                payload.sku,
-                error_type=type(error).__name__,
-            )
-        except httpx.HTTPStatusError as error:
-            status = 404 if error.response.status_code == 404 else 502
-            return failure(
-                state,
-                status,
-                "Inventory response unsuccessful",
-                "downstream_error",
-                version,
-                payload.sku,
-                downstream_status=error.response.status_code,
-            )
-
-        stock = response.json()
-        if stock["available"] < payload.quantity:
-            return failure(
-                state,
-                409,
-                "Insufficient inventory",
-                "checkout_rejected",
-                version,
-                payload.sku,
-            )
-        try:
-            # v2 mistakenly expects a renamed price field after a real inventory
-            # response. The downstream service still exposes the v1 contract.
-            price_field = "unit_price_cents" if version == "v1" else "unit_price"
-            total_cents = stock[price_field] * payload.quantity
-        except KeyError as error:
-            return failure(
-                state,
-                500,
-                "Checkout calculation failed",
-                "checkout_error",
-                version,
-                payload.sku,
-                error_type=type(error).__name__,
-            )
-
+        status, message, event, data = await calculate_checkout(state, payload, version)
+        if status != 200:
+            return failure(state, status, message, event, version, payload.sku, **data)
         record(
             state,
             "INFO",
-            "Checkout completed",
-            "checkout_completed",
+            message,
+            event,
             version=version,
             sku=payload.sku,
             status_code=200,
         )
-        return {
-            "sku": payload.sku,
-            "quantity": payload.quantity,
-            "total_cents": total_cents,
-            "version": version,
-        }
+        return data
+
+
+@app.get("/__ops/probe")
+async def probe(request: Request):
+    state = request.app.state
+    async with state.lock:
+        status, _, event, _ = await calculate_checkout(
+            state,
+            CheckoutInput(sku="SKU-001", quantity=1),
+            state.active_version,
+            observational=True,
+        )
+        if event == "downstream_error":
+            return JSONResponse(
+                {"detail": "Probe inventory unavailable"}, status_code=503
+            )
+        return {"service": "checkout", "ok": status == 200, "observed_status": status}
 
 
 @app.get("/__ops/health")

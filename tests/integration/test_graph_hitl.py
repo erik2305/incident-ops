@@ -1,4 +1,4 @@
-"""Pause A, approve in a fresh write-only B, inspect durable execution in C."""
+"""Pause A, approve/verify in fresh B, inspect durable recovery in C."""
 
 import asyncio
 import json
@@ -70,13 +70,18 @@ async def runtime_b(env, config, pending):
         before = await graph.aget_state(config)
         assert before.values["pending_action"] == pending
         assert before.interrupts[0].value["action_id"] == pending["action_id"]
-        async with open_write_capabilities(env["operations"]) as writes:
+        async with (
+            open_write_capabilities(env["operations"]) as writes,
+            open_read_capabilities(env["observability"], env["operations"]) as reads,
+        ):
             result = await graph.ainvoke(
                 Command(
                     resume={"decision": "approve", "action_id": pending["action_id"]}
                 ),
                 config=config,
-                context=IncidentRuntimeContext(write_capabilities=writes),
+                context=IncidentRuntimeContext(
+                    write_capabilities=writes, read_capabilities=reads
+                ),
             )
             assert (await graph.aget_state(config)).next == ()
             return result
@@ -90,7 +95,7 @@ async def runtime_c(database, config):
         return snapshot.values
 
 
-def test_pending_approval_survives_closed_runtime_and_write_only_resume(
+def test_pending_approval_survives_closed_runtime_and_verified_resume(
     rollback_environment,
 ):
     env = rollback_environment
@@ -129,7 +134,7 @@ def test_pending_approval_survives_closed_runtime_and_write_only_resume(
             assert checkout.post("/checkout", json=order).status_code == 500
             executed = run_async(runtime_b(env, config, pending))
             assert (
-                executed["status"] == "action_executed"
+                executed["status"] == "resolved"
                 and executed["pending_action"] == pending
             )
             assert executed["approval_record"] == {
@@ -140,6 +145,14 @@ def test_pending_approval_survives_closed_runtime_and_write_only_resume(
             assert executed["execution_record"]["action_id"] == pending["action_id"]
             assert executed["execution_record"]["fingerprint"] == pending["fingerprint"]
             assert executed["execution_record"]["result"]["applied"] is True
+            assert executed["verification_result"] == {
+                "action_id": pending["action_id"],
+                "target_version": "v1",
+                "deployment_matches_target": True,
+                "probe_ok": True,
+                "probe_status": 200,
+                "recovered": True,
+            }
             assert checkout.get("/__ops/deployments").json()["active_version"] == "v1"
             assert checkout.post("/checkout", json=order).status_code == 200
             restored = run_async(runtime_c(env["database"], config))
@@ -156,6 +169,7 @@ def test_pending_approval_survives_closed_runtime_and_write_only_resume(
                 "pending_action",
                 "approval_record",
                 "execution_record",
+                "verification_result",
             }
             serialized = json.dumps(restored, allow_nan=False)
             assert (

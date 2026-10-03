@@ -1,9 +1,22 @@
 # IncidentOps
 
 Incident investigation with structured LLM assessment, a bounded evidence loop,
-and durable human approval of exact rollback actions, orchestrated by LangGraph.
+durable human approval of exact rollback actions, and deterministic recovery
+verification, orchestrated by LangGraph.
 
 ## Development
+
+Start from the root environment example (keep an existing `.env`):
+
+```powershell
+Copy-Item .env.example .env
+```
+
+Populate `OPENROUTER_API_KEY` locally when live LLM tests are desired. The root
+example supplies the explicit model and all five host-side integration URLs.
+Start the five Compose services before using those URLs. Pytest loads the root
+`.env`; application callers still inject configuration explicitly. The real `.env`
+is excluded from Git and Docker images; the example contains no real secret.
 
 Create and activate a Python 3.11+ virtual environment, then install:
 
@@ -33,7 +46,8 @@ process. Unit tests alone require no external configuration.
 `START → initialize_incident → collect_initial_evidence → assess_evidence` with the
 caller's checkpointer. Assessment routes a proposal through
 `prepare_action → approval_gate` and interrupts for human approval. Approval resumes
-through `execute_action → END`; rejection through `reject_action → END`.
+through `execute_action → verify_recovery`, then `finalize_resolved → END` or
+`finalize_verification_failure → END`; rejection through `reject_action → END`.
 Assessment can also end with escalation, or route
 through `collect_requested_evidence → assess_evidence` once. A second request for
 more evidence routes through `escalate_evidence_limit → END`.
@@ -187,7 +201,7 @@ The official MCP Python SDK v2 (`mcp>=2,<3`) provides two independently addressa
 
 | Server | Loopback MCP endpoint | Exact tools |
 | --- | --- | --- |
-| `observability-mcp` | `http://127.0.0.1:8003/mcp` | `get_service_health`, `get_metrics`, `query_logs` |
+| `observability-mcp` | `http://127.0.0.1:8003/mcp` | `get_service_health`, `get_metrics`, `query_logs`, `probe_checkout` |
 | `operations-mcp` | `http://127.0.0.1:8004/mcp` | `get_recent_deployments`, `rollback_deployment` |
 
 Observability and deployment reads remain read-only. Operations also exposes the
@@ -196,7 +210,11 @@ test infrastructure; the rollback tool uses only `/__control/rollback` internall
 The reasoner receives evidence and can propose additional reads and rollback as
 data; it has no MCP tools. Read and write application contracts remain separate.
 
-Observability accepts only `service="checkout"` or `service="inventory"`.
+Health, metrics, and logs accept only `service="checkout"` or `service="inventory"`.
+`probe_checkout` accepts no arguments; surplus arguments are explicitly rejected.
+It is annotated read-only and closed-world and returns only `service`, `ok`, and
+`observed_status` as structured data. Business failure is a successful observation
+with `ok=false`; infrastructure failure is a failed tool call.
 Deployment reads accept only `service="checkout"` (the default). Logs and deployment
 reads accept `limit` from 1 to 100 (default 20) and return newest entries first.
 Structured results preserve health/counters, wrap logs as `{"logs": [...]}`, and
@@ -245,8 +263,10 @@ The existing PostgreSQL volume is retained.
 
 ## Graph evidence collection and persistence
 
-The application-facing `ReadCapabilities` protocol exposes only four named async
-methods. `open_read_capabilities` owns two official SDK clients for one graph run,
+The application-facing `ReadCapabilities` protocol exposes five named async
+methods. The model's evidence request schema remains restricted to the original
+four reads; the graph invokes the probe only for post-action verification.
+`open_read_capabilities` owns two official SDK clients for one graph run,
 reuses their connections, disables tool caching, and closes both on exit. The caller
 provides MCP URLs explicitly; the frozen `IncidentRuntimeContext` carries the adapter
 through LangGraph's native runtime context rather than checkpointed state:
@@ -340,7 +360,8 @@ another valid evidence request causes deterministic escalation with
 `escalation_reason="evidence_budget_exhausted"`. Provider, parsing, contract, or
 missing runtime dependency failures raise application errors; they are not incident
 escalations. A valid proposal continues to `awaiting_approval`; successful execution
-ends with `action_executed`, and rejection/escalation ends with `escalated`.
+checkpoints `action_executed` before verification. Confirmed recovery ends with
+`resolved`; completed unsuccessful verification or rejection ends with `escalated`.
 
 The only proposal is `rollback_deployment` for checkout. Its target must occur in
 observed checkout deployment history and differ from both the active and newest
@@ -410,14 +431,19 @@ An externally supplied human decision resumes the graph directly:
 ```python
 from langgraph.types import Command
 from incidentops.graph.runtime import IncidentRuntimeContext
-from incidentops.mcp.client import open_write_capabilities
+from incidentops.mcp.client import open_read_capabilities, open_write_capabilities
 
 # approval_decision contains only the human's approve/reject and persisted action_id.
-async with open_write_capabilities(operations_url) as writes:
+async with (
+    open_write_capabilities(operations_url) as writes,
+    open_read_capabilities(observability_url, operations_url) as reads,
+):
     result = await graph.ainvoke(
         Command(resume=approval_decision),
         config={"configurable": {"thread_id": incident_id}},
-        context=IncidentRuntimeContext(write_capabilities=writes),
+        context=IncidentRuntimeContext(
+            write_capabilities=writes, read_capabilities=reads
+        ),
     )
 
 # For rejection, use Command(resume=approval_decision) with no runtime context.
@@ -425,7 +451,8 @@ async with open_write_capabilities(operations_url) as writes:
 
 Reject resumes require no MCP, model, or write dependency and retain the pending
 action/approval for audit. They end with `escalated`, `action_rejected`. Approve
-resumes require only a fresh operations write client: no read MCP or LLM. The
+resumes require fresh read and write MCP clients for execution plus verification,
+with no LLM/reasoner. The
 executor checks action identity and both persisted fingerprints, rejects an
 existing execution record, then calls rollback using only PendingAction arguments.
 No reasoning or evidence read occurs between approval and mutation. Successful
@@ -450,14 +477,48 @@ access is outside this MVP threat model. The security claim is that the Incident
 graph never invokes rollback before valid human approval, not that every possible
 network client is prevented from invoking the internal capability.
 
-Rollback is implemented and human approval is required. Post-action verification,
-a resolved state, and FastAPI/SSE approval transport are not implemented yet.
-Independent test assertions checking recovery are not graph verification nodes.
+After execution, `verify_recovery` rechecks pending action, approved action identity,
+fingerprint, and matching execution result before making two sequential reads:
+`get_recent_deployments("checkout", limit=3)` and `probe_checkout()`. The target
+comes from PendingAction. Recovery requires both the active version and newest
+deployment entry to equal that target, and a probe with `ok=true` and status 200.
+Malformed observations raise `ReadCapabilityError`. No historical error counters
+or process health result can establish recovery.
+
+Checkout's fixed `GET /__ops/probe` uses SKU-001 and quantity 1. It shares
+`calculate_checkout` with `POST /checkout`, makes a real HTTP inventory call, and
+runs the same version-dependent price calculation. Inventory's private fixed
+`GET /__ops/probe-stock` shares `stock_for` with its business endpoint and suppresses
+ordinary traffic recording. Neither service's request/error counters or business
+logs change during a probe. The actual v2 missing-price-field defect yields a
+valid observed status 500; v1 computes successfully. No version-to-health oracle
+exists. Inventory transport/HTTP/malformed-contract failures cause raw probe HTTP
+503 and hence an MCP tool/capability error, rather than `ok=false`.
+
+Only after both valid observations does verification publish its plain
+`verification_result`: action ID, approved target, deployment match, probe status,
+probe success, and recovery decision. Pure terminal nodes set `resolved` or
+`escalated` with `verification_failed`, retaining every audit record. A completed
+negative verification does not trigger more reasoning, reads, or remediation.
+Rollback failure raises `WriteCapabilityError` without execution/verification
+success records. Verification infrastructure failure raises an exception and
+retains the saved execution and `action_executed` status, without fabricating an
+incident conclusion. A caller may explicitly retry the failed verification using
+`graph.ainvoke(None, config=config, context=IncidentRuntimeContext(read_capabilities=reads))`;
+this resumes verification and does not execute rollback again. No automatic retry
+or new resume path after terminal resolution is introduced.
+
+Runtime A has reads and a reasoner, Runtime B has reads and writes with no reasoner,
+and Runtime C inspects checkpoints with no operational capabilities. Execution
+still uses only writes; verification uses only reads. Strict serialization and
+untrusted evidence policy remain unchanged. FastAPI/SSE approval transport and
+final incident reports remain outside this slice.
 
 With the five infrastructure URLs above configured, explicitly verify both layers:
 
 ```powershell
 .\.venv\Scripts\python.exe -m pytest -q tests/integration/test_mcp_rollback.py -o cache_dir=.pytest-tmp-task007-cache
+.\.venv\Scripts\python.exe -m pytest -q tests/integration/test_mcp_probe.py -o cache_dir=.pytest-tmp-task008-cache
 .\.venv\Scripts\python.exe -m pytest -q tests/integration/test_graph_hitl.py -o cache_dir=.pytest-tmp-task007-cache
 # Also configure the ignored OpenRouter key and explicit model as shown above.
 .\.venv\Scripts\python.exe -m pytest -q -s tests/integration/test_graph_llm_reasoning.py -o cache_dir=.pytest-tmp-task007-cache
@@ -467,7 +528,12 @@ docker compose down
 
 The durable HITL test uses real PostgreSQL/MCP and a deterministic fake reasoner.
 Runtime A investigates and closes at the persisted interrupt while checkout still
-fails on v2. Fresh runtime B approves with write authority only and performs the
-real rollback; fresh runtime C recovers the action, approval, and execution with
-no MCP/LLM. The separate live OpenRouter test stops at approval and never auto-approves.
+fails on v2. Fresh runtime B approves with read/write authority, performs the
+real rollback and observes deployment plus checkout behavior, ending `resolved`.
+Fresh runtime C recovers the exact action, approval, execution, and verification
+with no MCP/LLM. The separate live OpenRouter test stops at approval and never
+auto-approves or verifies. Probe tests check v2 failure, v1 success, argument
+rejection, and unchanged business counters/logs in both services. Integration
+tests skip when their corresponding configuration is absent; partial configuration
+or configured infrastructure/provider failures fail.
 Tests reset synthetic services and delete unique threads. Shutdown retains the volume.

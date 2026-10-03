@@ -10,9 +10,10 @@ from mcp.server.mcpserver.exceptions import ToolError
 from pydantic import Field
 
 from incidentops.domain.actions import valid_rollback_result
+from incidentops.domain.verification import valid_probe_result
 
 Service = Literal["checkout", "inventory"]
-Endpoint = Literal["health", "metrics", "logs", "deployments"]
+Endpoint = Literal["health", "metrics", "logs", "deployments", "probe"]
 EvidenceLimit = Annotated[int, Field(ge=1, le=100, strict=True)]
 
 
@@ -56,6 +57,8 @@ def records_have_strings(value: Any, fields: tuple[str, ...]) -> bool:
 
 def valid_evidence(endpoint: Endpoint, data: Any) -> bool:
     """Check the existing raw contracts without rewriting evidence or log text."""
+    if endpoint == "probe":
+        return valid_probe_result(data)
     if endpoint == "logs":
         return records_have_strings(data, ("timestamp", "level", "service", "message"))
     if not isinstance(data, dict):
@@ -109,8 +112,10 @@ class HTTPBackend:
     async def read(self, service: Service, endpoint: Endpoint) -> Any:
         if service not in self.urls:
             raise ToolError("Unsupported service")
-        if endpoint not in {"health", "metrics", "logs", "deployments"}:
+        if endpoint not in {"health", "metrics", "logs", "deployments", "probe"}:
             raise ToolError("Unsupported evidence endpoint")
+        if endpoint == "probe" and service != "checkout":
+            raise ToolError("Unsupported probe service")
         url = f"{self.urls[service]}/__ops/{endpoint}"
         try:
             response = await self.client.get(url)

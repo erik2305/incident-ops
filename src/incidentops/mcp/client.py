@@ -11,6 +11,7 @@ from mcp import Client, MCPError
 from incidentops.domain.actions import valid_rollback_result
 from incidentops.domain.capabilities import ReadCapabilityError, WriteCapabilityError
 from incidentops.domain.models import Capability, JSONData, Service
+from incidentops.domain.verification import valid_probe_result
 
 
 def is_json_value(value: object) -> bool:
@@ -36,10 +37,14 @@ def records_match(value: object, fields: tuple[str, ...]) -> bool:
     )
 
 
-def valid_result(capability: Capability, data: object) -> bool:
+def valid_result(
+    capability: Capability | Literal["probe_checkout"], data: object
+) -> bool:
     """Validate structured success at the consumer boundary, without text parsing."""
     if type(data) is not dict or not is_json_value(data):
         return False
+    if capability == "probe_checkout":
+        return valid_probe_result(data)
     if capability == "get_service_health":
         return all(isinstance(data.get(field), str) for field in ("service", "status"))
     if capability == "get_metrics":
@@ -66,12 +71,12 @@ class MCPReadCapabilities:
     async def _read(
         self,
         client: Client,
-        capability: Capability,
+        capability: Capability | Literal["probe_checkout"],
         service: Service,
         *,
         limit: int | None = None,
     ) -> JSONData:
-        arguments = {"service": service}
+        arguments = {} if capability == "probe_checkout" else {"service": service}
         if limit is not None:
             arguments["limit"] = limit
         try:
@@ -99,6 +104,9 @@ class MCPReadCapabilities:
 
     async def get_service_health(self, service: Service) -> JSONData:
         return await self._read(self._observability, "get_service_health", service)
+
+    async def probe_checkout(self) -> JSONData:
+        return await self._read(self._observability, "probe_checkout", "checkout")
 
     async def get_metrics(self, service: Service) -> JSONData:
         return await self._read(self._observability, "get_metrics", service)

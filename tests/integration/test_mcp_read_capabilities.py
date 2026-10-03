@@ -63,7 +63,12 @@ async def evidence(client, name, arguments):
 def test_exact_read_only_tool_sets(endpoints):
     async def verify():
         expected = {
-            "observability": {"get_service_health", "get_metrics", "query_logs"},
+            "observability": {
+                "get_service_health",
+                "get_metrics",
+                "query_logs",
+                "probe_checkout",
+            },
             "operations": {"get_recent_deployments", "rollback_deployment"},
         }
         for domain, names in expected.items():
@@ -80,6 +85,9 @@ def test_exact_read_only_tool_sets(endpoints):
                     assert tool.annotations.open_world_hint is False
                     assert tool.output_schema is not None
                     properties = tool.input_schema["properties"]
+                    if tool.name == "probe_checkout":
+                        assert properties == {}
+                        continue
                     assert set(properties) <= {"service", "limit", "target_version"}
                     if tool.name == "rollback_deployment":
                         assert set(properties) == {"service", "target_version"}
@@ -272,7 +280,14 @@ def local_failure_server(unreachable_url, tmp_path):
                 process.wait(timeout=5)
 
 
-def test_upstream_failure_is_a_failed_mcp_tool_call(tmp_path):
+@pytest.mark.parametrize(
+    ("tool", "arguments"),
+    [
+        ("get_metrics", {"service": "checkout"}),
+        ("probe_checkout", {}),
+    ],
+)
+def test_upstream_failure_is_a_failed_mcp_tool_call(tmp_path, tool, arguments):
     # Binding without listening reserves a guaranteed unreachable local port.
     with socket.socket() as unreachable:
         unreachable.bind(("127.0.0.1", 0))
@@ -283,9 +298,7 @@ def test_upstream_failure_is_a_failed_mcp_tool_call(tmp_path):
                 async with Client(
                     mcp_url, cache=None, read_timeout_seconds=10
                 ) as client:
-                    result = await client.call_tool(
-                        "get_metrics", {"service": "checkout"}
-                    )
+                    result = await client.call_tool(tool, arguments)
                     assert result.is_error is True
                     assert result.structured_content is None
                     assert result.content

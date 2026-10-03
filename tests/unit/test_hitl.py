@@ -9,9 +9,15 @@ from langgraph.runtime import Runtime
 from langgraph.types import Command
 
 from incidentops.domain.actions import ActionIntegrityError
-from incidentops.domain.capabilities import WriteCapabilityError
+from incidentops.domain.capabilities import ReadCapabilityError, WriteCapabilityError
 from incidentops.graph import build_graph
-from incidentops.graph.nodes import approval_gate, execute_action, prepare_action
+from incidentops.graph.nodes import (
+    approval_gate,
+    execute_action,
+    prepare_action,
+    verify_recovery,
+)
+from incidentops.graph.routing import route_verification
 from incidentops.graph.runtime import IncidentRuntimeContext
 
 
@@ -115,25 +121,47 @@ def test_interrupt_exposes_exact_checkpointed_action_and_response_schema(paused)
     assert interrupted.response_schema["additionalProperties"] is False
 
 
-def test_approve_resumes_with_only_write_authority(paused, read_capabilities, reasoner):
+def test_approve_resumes_with_reads_and_writes_without_reasoner(
+    paused, read_capabilities, reasoner, monkeypatch
+):
     graph, config, _, writes = paused
     pending = graph.get_state(config).values["pending_action"]
     before = (len(read_capabilities.calls), len(reasoner.calls))
+
+    async def recovered_deployments(service, *, limit):
+        read_capabilities.called("get_recent_deployments", service, limit)
+        return {
+            "active_version": "v1",
+            "deployment_history": [{"version": "v1", "timestamp": "2026-10-03"}],
+        }
+
+    monkeypatch.setattr(
+        read_capabilities, "get_recent_deployments", recovered_deployments
+    )
     result = resume(
         graph,
         config,
         "approve",
         pending["action_id"],
-        IncidentRuntimeContext(write_capabilities=writes),
+        IncidentRuntimeContext(
+            write_capabilities=writes, read_capabilities=read_capabilities
+        ),
     )
     assert writes.calls == [
         {"service": pending["service"], "target_version": pending["target_version"]}
     ]
-    assert (len(read_capabilities.calls), len(reasoner.calls)) == before
-    assert result["status"] == "action_executed"
+    assert len(reasoner.calls) == before[1]
+    assert read_capabilities.calls[before[0] :] == [
+        ("get_recent_deployments", "checkout", 3),
+        ("probe_checkout", "checkout", None),
+    ]
+    assert result["status"] == "resolved"
+    assert result["verification_result"]["recovered"] is True
     assert result["execution_record"]["action_id"] == pending["action_id"]
     assert result["execution_record"]["fingerprint"] == pending["fingerprint"]
     assert graph.get_state(config).next == ()
+    assert asyncio.run(graph.ainvoke(None, config=config)) == result
+    assert len(writes.calls) == 1
 
 
 def test_reject_requires_no_runtime_dependencies_and_never_writes(
@@ -144,6 +172,7 @@ def test_reject_requires_no_runtime_dependencies_and_never_writes(
     before = (len(read_capabilities.calls), len(reasoner.calls))
     result = resume(graph, config, "reject", pending["action_id"])
     assert writes.calls == [] and "execution_record" not in result
+    assert "verification_result" not in result
     assert (
         result["status"] == "escalated"
         and result["escalation_reason"] == "action_rejected"
@@ -275,3 +304,178 @@ def test_missing_or_failed_write_keeps_approval_but_no_execution(paused, missing
     assert state["approval_record"]["decision"] == "approve"
     assert "execution_record" not in state and state["status"] != "action_executed"
     assert len(writes.calls) == (0 if missing else 1)
+
+
+@pytest.mark.parametrize(
+    "failure", ["missing", "get_recent_deployments", "probe_checkout"]
+)
+def test_verification_failure_preserves_execution_and_retries_only_reads(
+    paused, read_capabilities, reasoner, failure, monkeypatch
+):
+    graph, config, _, writes = paused
+    pending = graph.get_state(config).values["pending_action"]
+    before_reasoning = len(reasoner.calls)
+    read_capabilities.fail_capability = failure
+    context = IncidentRuntimeContext(
+        write_capabilities=writes,
+        read_capabilities=None if failure == "missing" else read_capabilities,
+    )
+    with pytest.raises(ReadCapabilityError):
+        resume(graph, config, "approve", pending["action_id"], context)
+    snapshot = graph.get_state(config)
+    assert snapshot.next == ("verify_recovery",)
+    assert snapshot.values["status"] == "action_executed"
+    assert "execution_record" in snapshot.values
+    assert "verification_result" not in snapshot.values
+    assert "escalation_reason" not in snapshot.values
+    read_capabilities.fail_capability = None
+
+    async def recovered_deployments(service, *, limit):
+        read_capabilities.called("get_recent_deployments", service, limit)
+        return {
+            "active_version": "v1",
+            "deployment_history": [{"version": "v1", "timestamp": "now"}],
+        }
+
+    monkeypatch.setattr(
+        read_capabilities, "get_recent_deployments", recovered_deployments
+    )
+    result = asyncio.run(
+        graph.ainvoke(
+            None,
+            config=config,
+            context=IncidentRuntimeContext(read_capabilities=read_capabilities),
+        )
+    )
+    assert result["status"] == "resolved"
+    assert len(writes.calls) == 1 and len(reasoner.calls) == before_reasoning
+
+
+@pytest.mark.parametrize(
+    ("matches", "probe_ok"), [(True, True), (True, False), (False, True)]
+)
+def test_verification_decision_is_deterministic_and_checkpoint_safe(
+    paused, read_capabilities, reasoner, monkeypatch, matches, probe_ok
+):
+    import json
+
+    graph, config, _, writes = paused
+    reasoning_calls = len(reasoner.calls)
+    pending = graph.get_state(config).values["pending_action"]
+
+    async def deployments(service, *, limit):
+        read_capabilities.called("get_recent_deployments", service, limit)
+        version = "v1" if matches else "v2"
+        return {
+            "active_version": version,
+            "deployment_history": [{"version": version, "timestamp": "now"}],
+        }
+
+    async def probe():
+        read_capabilities.called("probe_checkout", "checkout")
+        return {
+            "service": "checkout",
+            "ok": probe_ok,
+            "observed_status": 200 if probe_ok else 500,
+        }
+
+    monkeypatch.setattr(read_capabilities, "get_recent_deployments", deployments)
+    monkeypatch.setattr(read_capabilities, "probe_checkout", probe)
+    result = resume(
+        graph,
+        config,
+        "approve",
+        pending["action_id"],
+        IncidentRuntimeContext(
+            read_capabilities=read_capabilities, write_capabilities=writes
+        ),
+    )
+    recovered = matches and probe_ok
+    assert result["verification_result"] == {
+        "action_id": pending["action_id"],
+        "target_version": "v1",
+        "deployment_matches_target": matches,
+        "probe_ok": probe_ok,
+        "probe_status": 200 if probe_ok else 500,
+        "recovered": recovered,
+    }
+    assert (
+        json.loads(json.dumps(result["verification_result"], allow_nan=False))
+        == result["verification_result"]
+    )
+    assert result["status"] == ("resolved" if recovered else "escalated")
+    if not recovered:
+        assert result["escalation_reason"] == "verification_failed"
+    assert len(writes.calls) == 1 and graph.get_state(config).next == ()
+    assert len(reasoner.calls) == reasoning_calls
+
+
+@pytest.mark.parametrize("bad_observation", ["deployments", "probe"])
+def test_malformed_verification_observations_publish_no_conclusion(
+    paused, read_capabilities, monkeypatch, bad_observation
+):
+    graph, config, _, writes = paused
+    pending = graph.get_state(config).values["pending_action"]
+
+    async def malformed(*args, **kwargs):
+        return {}
+
+    monkeypatch.setattr(
+        read_capabilities,
+        "get_recent_deployments"
+        if bad_observation == "deployments"
+        else "probe_checkout",
+        malformed,
+    )
+    with pytest.raises(ReadCapabilityError, match="invalid"):
+        resume(
+            graph,
+            config,
+            "approve",
+            pending["action_id"],
+            IncidentRuntimeContext(
+                read_capabilities=read_capabilities, write_capabilities=writes
+            ),
+        )
+    state = graph.get_state(config).values
+    assert state["status"] == "action_executed" and "execution_record" in state
+    assert "verification_result" not in state and "escalation_reason" not in state
+    assert len(writes.calls) == 1
+
+
+@pytest.mark.parametrize(
+    "change", ["missing", "action_id", "fingerprint", "result", "approval"]
+)
+def test_verifier_checks_authority_before_reading(paused, read_capabilities, change):
+    state, writes = execution_state(paused)
+    state.update(
+        asyncio.run(
+            execute_action(
+                state,
+                Runtime(context=IncidentRuntimeContext(write_capabilities=writes)),
+            )
+        )
+    )
+    if change == "missing":
+        state.pop("execution_record")
+    elif change == "approval":
+        state["approval_record"]["decision"] = "reject"
+    else:
+        state["execution_record"][change] = "invalid"
+    before = len(read_capabilities.calls)
+    with pytest.raises(ActionIntegrityError):
+        asyncio.run(
+            verify_recovery(
+                state,
+                Runtime(
+                    context=IncidentRuntimeContext(read_capabilities=read_capabilities)
+                ),
+            )
+        )
+    assert len(read_capabilities.calls) == before
+
+
+@pytest.mark.parametrize("recovered", [0, 1, "true", None])
+def test_verification_route_requires_a_boolean(recovered):
+    with pytest.raises(ValueError, match="boolean"):
+        route_verification({"verification_result": {"recovered": recovered}})

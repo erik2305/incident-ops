@@ -11,11 +11,18 @@ from incidentops.graph.nodes import (
     collect_requested_evidence,
     escalate_evidence_limit,
     execute_action,
+    finalize_resolved,
+    finalize_verification_failure,
     initialize_incident,
     prepare_action,
     reject_action,
+    verify_recovery,
 )
-from incidentops.graph.routing import route_approval, route_assessment
+from incidentops.graph.routing import (
+    route_approval,
+    route_assessment,
+    route_verification,
+)
 from incidentops.graph.runtime import IncidentRuntimeContext
 from incidentops.graph.state import IncidentState
 
@@ -32,6 +39,9 @@ def build_graph(*, checkpointer: BaseCheckpointSaver) -> CompiledStateGraph:
     builder.add_node("approval_gate", approval_gate)
     builder.add_node("execute_action", execute_action)
     builder.add_node("reject_action", reject_action)
+    builder.add_node("verify_recovery", verify_recovery)
+    builder.add_node("finalize_resolved", finalize_resolved)
+    builder.add_node("finalize_verification_failure", finalize_verification_failure)
     builder.add_edge(START, "initialize_incident")
     builder.add_edge("initialize_incident", "collect_initial_evidence")
     builder.add_edge("collect_initial_evidence", "assess_evidence")
@@ -53,6 +63,13 @@ def build_graph(*, checkpointer: BaseCheckpointSaver) -> CompiledStateGraph:
         route_approval,
         {"approve": "execute_action", "reject": "reject_action"},
     )
-    builder.add_edge("execute_action", END)
+    builder.add_edge("execute_action", "verify_recovery")
+    builder.add_conditional_edges(
+        "verify_recovery",
+        route_verification,
+        {"resolved": "finalize_resolved", "failed": "finalize_verification_failure"},
+    )
+    builder.add_edge("finalize_resolved", END)
+    builder.add_edge("finalize_verification_failure", END)
     builder.add_edge("reject_action", END)
     return builder.compile(checkpointer=checkpointer)

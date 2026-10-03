@@ -15,13 +15,14 @@ from incidentops.domain.actions import (
     validate_approval,
     validate_pending_action,
 )
-from incidentops.domain.capabilities import WriteCapabilityError
+from incidentops.domain.capabilities import ReadCapabilityError, WriteCapabilityError
 from incidentops.domain.models import EvidenceItem
 from incidentops.domain.reasoning import (
     ReasoningContractError,
     ReasoningError,
     validate_assessment,
 )
+from incidentops.domain.verification import valid_probe_result
 from incidentops.graph.runtime import IncidentRuntimeContext
 from incidentops.graph.state import IncidentState
 
@@ -233,3 +234,67 @@ def reject_action(state: IncidentState) -> dict:
     pending = validate_pending_action(state["incident_id"], state.get("pending_action"))
     validate_approval(state.get("approval_record"), pending, "reject")
     return {"status": "escalated", "escalation_reason": "action_rejected"}
+
+
+async def verify_recovery(
+    state: IncidentState, runtime: Runtime[IncidentRuntimeContext]
+) -> dict:
+    """Observe once after execution; publish both observations atomically."""
+    pending = validate_pending_action(state["incident_id"], state.get("pending_action"))
+    validate_approval(state.get("approval_record"), pending, "approve")
+    execution = state.get("execution_record")
+    if (
+        type(execution) is not dict
+        or set(execution) != {"action_id", "fingerprint", "result"}
+        or execution["action_id"] != pending["action_id"]
+        or execution["fingerprint"] != pending["fingerprint"]
+        or not valid_rollback_result(execution["result"], pending["target_version"])
+    ):
+        raise ActionIntegrityError(
+            "Verification requires the matching execution record"
+        )
+    if runtime.context is None or runtime.context.read_capabilities is None:
+        raise ReadCapabilityError("Verification requires run-scoped read_capabilities")
+    reads = runtime.context.read_capabilities
+    deployments = await reads.get_recent_deployments("checkout", limit=3)
+    # Validate application inputs even when the adapter is supplied by a caller.
+    if (
+        type(deployments) is not dict
+        or type(deployments.get("active_version")) is not str
+        or type(deployments.get("deployment_history")) is not list
+        or not deployments["deployment_history"]
+        or any(
+            type(item) is not dict
+            or type(item.get("version")) is not str
+            or type(item.get("timestamp")) is not str
+            for item in deployments["deployment_history"]
+        )
+    ):
+        raise ReadCapabilityError(
+            "Verification received invalid deployment observations"
+        )
+    probe = await reads.probe_checkout()
+    if not valid_probe_result(probe):
+        raise ReadCapabilityError("Verification received invalid probe observations")
+    matches = (
+        deployments["active_version"] == pending["target_version"]
+        and deployments["deployment_history"][0]["version"] == pending["target_version"]
+    )
+    return {
+        "verification_result": {
+            "action_id": pending["action_id"],
+            "target_version": pending["target_version"],
+            "deployment_matches_target": matches,
+            "probe_ok": probe["ok"],
+            "probe_status": probe["observed_status"],
+            "recovered": matches and probe["ok"] and probe["observed_status"] == 200,
+        }
+    }
+
+
+def finalize_resolved(state: IncidentState) -> dict:
+    return {"status": "resolved"}
+
+
+def finalize_verification_failure(state: IncidentState) -> dict:
+    return {"status": "escalated", "escalation_reason": "verification_failed"}

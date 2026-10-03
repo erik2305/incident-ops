@@ -23,6 +23,10 @@ async def lifespan(app: FastAPI):
 app = FastAPI(lifespan=lifespan, docs_url=None, redoc_url=None, openapi_url=None)
 
 
+def stock_for(sku):
+    return {"sku": sku, "available": STOCK[sku], "unit_price_cents": 1999}
+
+
 @app.get("/inventory/{sku}")
 async def inventory(sku: str, request: Request):
     state = request.app.state
@@ -42,7 +46,13 @@ async def inventory(sku: str, request: Request):
         )
         if not known:
             return JSONResponse({"detail": "SKU not found"}, status_code=404)
-        return {"sku": sku, "available": STOCK[sku], "unit_price_cents": 1999}
+        return stock_for(sku)
+
+
+@app.get("/__ops/probe-stock")
+async def probe_stock():
+    """Fixed observational inventory read for checkout's business probe."""
+    return stock_for("SKU-001")
 
 
 @app.get("/__ops/health")

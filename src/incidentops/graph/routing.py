@@ -17,3 +17,10 @@ def route_assessment(
 
 def route_approval(state: IncidentState) -> Literal["approve", "reject"]:
     return state["approval_record"]["decision"]
+
+
+def route_verification(state: IncidentState) -> Literal["resolved", "failed"]:
+    recovered = state["verification_result"]["recovered"]
+    if type(recovered) is not bool:
+        raise ValueError("Verification recovered must be a boolean")
+    return "resolved" if recovered else "failed"

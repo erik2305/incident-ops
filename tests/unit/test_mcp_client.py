@@ -16,6 +16,60 @@ from incidentops.mcp.client import (
 )
 
 
+@pytest.mark.parametrize(("ok", "status"), [(True, 200), (False, 500)])
+def test_probe_success_uses_empty_arguments_and_observability_only(ok, status):
+    data = {"service": "checkout", "ok": ok, "observed_status": status}
+    obs = SimpleNamespace(
+        call_tool=AsyncMock(
+            return_value=SimpleNamespace(is_error=False, structured_content=data)
+        )
+    )
+    ops = SimpleNamespace(call_tool=AsyncMock())
+    assert asyncio.run(MCPReadCapabilities(obs, ops).probe_checkout()) == data
+    obs.call_tool.assert_awaited_once_with("probe_checkout", {})
+    ops.call_tool.assert_not_awaited()
+
+
+@pytest.mark.parametrize(
+    ("is_error", "data"),
+    [
+        (True, {"service": "checkout", "ok": False, "observed_status": 500}),
+        (False, None),
+        (False, {}),
+        (False, {"service": "inventory", "ok": True, "observed_status": 200}),
+        (False, {"service": "checkout", "ok": "false", "observed_status": 500}),
+        (False, {"service": "checkout", "ok": False, "observed_status": 200}),
+        (False, {"service": "checkout", "ok": True, "observed_status": True}),
+        (False, {"service": "checkout", "ok": False, "observed_status": 999}),
+        (
+            False,
+            {
+                "service": "checkout",
+                "ok": True,
+                "observed_status": 200,
+                "extra": object(),
+            },
+        ),
+    ],
+)
+def test_probe_errors_and_malformed_structured_data_are_not_failed_business_probes(
+    is_error, data
+):
+    client = SimpleNamespace(
+        call_tool=AsyncMock(
+            return_value=SimpleNamespace(
+                is_error=is_error,
+                structured_content=data,
+                content=[
+                    {"text": '{"service":"checkout","ok":true,"observed_status":200}'}
+                ],
+            )
+        )
+    )
+    with pytest.raises(ReadCapabilityError, match="probe_checkout"):
+        asyncio.run(MCPReadCapabilities(client, client).probe_checkout())
+
+
 @pytest.mark.parametrize(
     ("capability", "service", "limit", "data", "domain"),
     [

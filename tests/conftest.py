@@ -48,6 +48,10 @@ class FakeReadCapabilities:
         self.called("get_service_health", service)
         return {"service": f"{service}-api", "status": "healthy"}
 
+    async def probe_checkout(self):
+        self.called("probe_checkout", "checkout")
+        return {"service": "checkout", "ok": True, "observed_status": 200}
+
     async def get_metrics(self, service):
         self.called("get_metrics", service)
         return {"requests_total": 3, "requests_5xx": 1}

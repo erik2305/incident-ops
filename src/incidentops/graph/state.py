@@ -5,6 +5,7 @@ from typing import Literal, NotRequired, TypedDict
 from incidentops.domain.actions import ApprovalRecord, ExecutionRecord, PendingAction
 from incidentops.domain.models import EvidenceItem, Service
 from incidentops.domain.reasoning import Assessment, RemediationProposal
+from incidentops.domain.verification import VerificationResult
 
 
 class IncidentState(TypedDict):
@@ -20,6 +21,7 @@ class IncidentState(TypedDict):
             "escalated",
             "awaiting_approval",
             "action_executed",
+            "resolved",
         ]
     ]
     evidence: NotRequired[list[EvidenceItem]]
@@ -30,3 +32,4 @@ class IncidentState(TypedDict):
     pending_action: NotRequired[PendingAction]
     approval_record: NotRequired[ApprovalRecord]
     execution_record: NotRequired[ExecutionRecord]
+    verification_result: NotRequired[VerificationResult]
