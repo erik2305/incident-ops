@@ -7,7 +7,7 @@ name = "incidentops"
 version = "0.1.0"
 description = "A LangGraph foundation for incident response."
 requires-python = ">=3.11"
-dependencies = ["langgraph"]
+dependencies = ["langgraph", "langgraph-checkpoint-postgres", "psycopg[binary]"]
 
 [project.optional-dependencies]
 dev = ["pytest", "ruff"]
@@ -17,6 +17,7 @@ where = ["src"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+markers = ["integration: requires a real PostgreSQL test database"]
 
 [tool.ruff]
 target-version = "py311"
