@@ -3,6 +3,7 @@
 Incident investigation with structured LLM assessment, a bounded evidence loop,
 durable human approval of exact rollback actions, and deterministic recovery
 verification, orchestrated by LangGraph.
+An asynchronous host API exposes that lifecycle through native FastAPI SSE.
 
 ## Development
 
@@ -537,3 +538,142 @@ rejection, and unchanged business counters/logs in both services. Integration
 tests skip when their corresponding configuration is absent; partial configuration
 or configured infrastructure/provider failures fail.
 Tests reset synthetic services and delete unique threads. Shutdown retains the volume.
+
+## Local API and live SSE demo
+
+The control plane is an unauthenticated local/demo MVP. Run it on loopback; it is
+not an internet-ready API. The existing five Compose services remain unchanged.
+FastAPI uses its native `EventSourceResponse`/`ServerSentEvent` support, available
+from version 0.135.0. No external SSE integration is used by the API.
+
+For a fresh configuration, copy the root example and fill the local key. Keep an
+existing `.env` and add the four API runtime settings from `.env.example` to it:
+
+```powershell
+Copy-Item .env.example .env
+# Edit .env locally: populate OPENROUTER_API_KEY, never commit the key.
+.\.venv\Scripts\python.exe -m pip install -e ".[dev]"
+docker compose up -d --build --wait
+
+# Load only API runtime settings into this shell; this does not print values.
+foreach ($line in Get-Content -LiteralPath .env) {
+    if ($line -match '^\s*(OPENROUTER_API_KEY|INCIDENTOPS_DATABASE_URL|INCIDENTOPS_OBSERVABILITY_MCP_URL|INCIDENTOPS_OPERATIONS_MCP_URL|INCIDENTOPS_OPENROUTER_MODEL)\s*=\s*(.*?)\s*$') {
+        $value = $Matches[2].Trim().Trim('"').Trim("'")
+        [Environment]::SetEnvironmentVariable($Matches[1], $value, 'Process')
+    }
+}
+
+# Provision checkpoint schema explicitly, before starting the API.
+.\.venv\Scripts\python.exe -m incidentops.api.setup
+.\.venv\Scripts\python.exe -m incidentops.api
+```
+
+The launch module runs Uvicorn at `http://127.0.0.1:8010` on a selector event loop,
+including on Windows where async Psycopg cannot use a Proactor loop. App factory
+`incidentops.api.app:create_app` also accepts explicit configuration and dependency
+factories for embedding/testing. Importing the module opens no database, MCP, or
+OpenRouter client. Startup opens one existing strict PostgreSQL saver and builds
+the accepted graph; schema setup is never performed implicitly by the app.
+
+In a second PowerShell window, prepare the existing synthetic v2 incident and open
+the initial SSE response. The temporary JSON files avoid Windows command-line
+JSON quoting issues:
+
+```powershell
+$checkout = 'http://127.0.0.1:8002'
+$inventory = 'http://127.0.0.1:8001'
+$api = 'http://127.0.0.1:8010'
+Invoke-RestMethod "$checkout/__control/reset" -Method Post
+Invoke-RestMethod "$inventory/__control/reset" -Method Post
+Invoke-RestMethod "$checkout/__control/deploy" -Method Post -ContentType 'application/json' -Body '{"version":"v2"}'
+# Expected 500 creates actual incident evidence.
+@{ sku = 'SKU-001'; quantity = 1 } | ConvertTo-Json | Set-Content -LiteralPath "$env:TEMP\incidentops-order.json" -Encoding utf8
+curl.exe -s -o NUL -w '%{http_code}' -H 'Content-Type: application/json' --data-binary "@$env:TEMP\incidentops-order.json" "$checkout/checkout"
+
+@{
+    user_report = 'Checkout returns HTTP 500 after the deployment.'
+    target_service = 'checkout'
+} | ConvertTo-Json | Set-Content -LiteralPath "$env:TEMP\incidentops-start.json" -Encoding utf8
+curl.exe --no-buffer -H 'Content-Type: application/json' --data-binary "@$env:TEMP\incidentops-start.json" "$api/incidents"
+```
+
+The first event is `incident_started`, followed by bounded node `progress` events.
+When the actual LangGraph interrupt is reached, `approval_required` displays its
+persisted incident ID, action ID, fingerprint, and exact action, then closes the
+connection. Copy the incident/action IDs from that event, review the action, and
+resume it later:
+
+```powershell
+$incidentId = '<incident_id from SSE>'
+$actionId = '<action_id from approval_required>'
+Invoke-RestMethod "$api/incidents/$incidentId"
+# GET /result returns 409 while the incident awaits approval.
+
+@{
+    decision = 'approve' # Use 'reject' to refuse the exact pending action.
+    action_id = $actionId
+} | ConvertTo-Json | Set-Content -LiteralPath "$env:TEMP\incidentops-approval.json" -Encoding utf8
+curl.exe --no-buffer -H 'Content-Type: application/json' --data-binary "@$env:TEMP\incidentops-approval.json" "$api/incidents/$incidentId/approval"
+Invoke-RestMethod "$api/incidents/$incidentId"
+Invoke-RestMethod "$api/incidents/$incidentId/result"
+```
+
+Approval opens fresh read/write MCP clients, resumes the same thread, streams
+execution and verification progress, then emits `completed` with `resolved` or
+`escalated`. It creates no reasoner. Rejection opens no capabilities, records
+`action_rejected`, and emits `completed/escalated`. The result endpoint returns
+structured root cause and execution/verification facts or an escalation reason,
+without generating a prose report.
+
+| Route | Contract |
+| --- | --- |
+| `POST /incidents` | Strict `user_report`, closed `target_service`; server-generated UUID; SSE |
+| `GET /incidents/{id}` | API-owned projection of current checkpoint state; absent fields omitted |
+| `POST /incidents/{id}/approval` | Only strict `decision` and `action_id`; SSE |
+| `GET /incidents/{id}/result` | Compact terminal result; 409 for a non-terminal incident |
+| `GET /health` | Process health; no downstream calls |
+
+Event names are exactly `incident_started`, `progress`, `approval_required`,
+`completed`, and `error`. Progress contains only incident ID, completed node, and
+current status. Completed contains ID, terminal status, and optional escalation
+reason. Error contains ID, a fixed code, and safe message. No evidence, raw graph
+metadata, prompts, model responses/tokens, runtime credentials, or hidden reasoning
+appears in progress events. Detailed operational state is available through GET,
+with its existing untrusted-evidence labels preserved.
+
+Pre-stream errors are ordinary JSON HTTP errors: 422 for invalid/extra request
+fields, 404 for an unknown incident, 409 for wrong action/lifecycle/overlapping
+operations, and 503 if checkpoint inspection fails. Approval preflight also
+requires an actual interrupt; graph-level integrity validation remains authoritative.
+Failures after streaming begins emit one safe `error` and close the stream, without
+fabricating an incident escalation. A failed execution/verification remains visible
+at its last saved checkpoint. This slice adds no retry endpoint.
+
+**SSE transport is live and non-durable. LangGraph/PostgreSQL state is durable.**
+There are no event IDs, Last-Event-ID replay, persisted event history, or event bus.
+Reconnect using GET to inspect current state. If the client disconnects, cancellation
+stops the active request-driven graph run and closes MCP/model resources; already
+written checkpoints remain. The API does not continue execution in a background
+worker. A disconnect before the first checkpoint may leave no durable state for
+the streamed ID. A small process-local reservation rejects overlapping operations
+for one incident; it does not provide cross-process arbitration or exactly-once
+semantics. Existing action guards and rollback idempotency remain the backstop.
+
+Run the network-level API proof with all five test URLs configured as above:
+
+```powershell
+.\.venv\Scripts\python.exe -m pytest -q tests/integration/test_api_lifecycle.py --basetemp=.pytest-tmp-task009-api -o cache_dir=.pytest-tmp-task009-api-cache
+.\.venv\Scripts\python.exe -m pytest -q -s tests/integration/test_graph_llm_reasoning.py --basetemp=.pytest-tmp-task009-live -o cache_dir=.pytest-tmp-task009-live-cache
+.\.venv\Scripts\python.exe -m pytest -q --basetemp=.pytest-tmp-task009-full -o cache_dir=.pytest-tmp-task009-full-cache
+```
+
+API integrations use real PostgreSQL, synthetic services, MCP, and live loopback
+HTTP streams with a deterministic fake reasoner. They close app A at approval and
+use a fresh app B for later approval/rejection; no live model is needed. Unit API
+tests also prove first-event delivery during blocked reasoning, disconnect
+cancellation, safe error projection, and dependency ownership. API integrations
+skip when all five test URLs are absent; partial/configured failures fail. The
+existing live OpenRouter regression retains its separate key/model requirements.
+
+After the demo, stop the host API with Ctrl+C, reset the two synthetic services,
+and run `docker compose down` without `--volumes` to retain PostgreSQL data.

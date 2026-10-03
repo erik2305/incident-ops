@@ -1,9 +1,13 @@
 """Fake reads keep graph and checkpoint regression tests infrastructure-specific."""
 
+import asyncio
 import os
+import socket
+from contextlib import asynccontextmanager
 from pathlib import Path
 
 import pytest
+import uvicorn
 from dotenv import load_dotenv
 
 from incidentops.domain.capabilities import ReadCapabilityError
@@ -111,3 +115,46 @@ def incident_runtime(read_capabilities, reasoner):
     return IncidentRuntimeContext(
         read_capabilities=read_capabilities, reasoner=reasoner
     )
+
+
+@pytest.fixture
+def api_server():
+    """Actual loopback HTTP streaming; tests own and await server teardown."""
+
+    @asynccontextmanager
+    async def serve(app):
+        with socket.socket() as listener:
+            listener.bind(("127.0.0.1", 0))
+            port = listener.getsockname()[1]
+            server = uvicorn.Server(
+                uvicorn.Config(
+                    app,
+                    host="127.0.0.1",
+                    port=port,
+                    http="h11",
+                    ws="none",
+                    lifespan="on",
+                    log_level="error",
+                    access_log=False,
+                    timeout_graceful_shutdown=2,
+                )
+            )
+            task = asyncio.create_task(server.serve(sockets=[listener]))
+            try:
+                async with asyncio.timeout(15):
+                    while not server.started:
+                        if task.done():
+                            await task
+                            raise AssertionError("API server exited before startup")
+                        await asyncio.sleep(0.01)
+                yield f"http://127.0.0.1:{port}"
+            finally:
+                server.should_exit = True
+                try:
+                    await asyncio.wait_for(task, timeout=10)
+                finally:
+                    if not task.done():
+                        task.cancel()
+                        await task
+
+    return serve
