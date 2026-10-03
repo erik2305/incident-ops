@@ -1,6 +1,7 @@
 # IncidentOps
 
-A minimal LangGraph foundation for incident response.
+Read-only incident investigation with structured LLM assessment and a bounded
+additional-evidence loop, orchestrated and checkpointed by LangGraph.
 
 ## Development
 
@@ -22,8 +23,11 @@ git diff --check
 ## Graph contract
 
 `incidentops.graph.build_graph(checkpointer=...)` compiles
-`START → initialize_incident → collect_initial_evidence → END` with the caller's
-checkpointer. Input requires non-empty `incident_id` and `user_report` strings and
+`START → initialize_incident → collect_initial_evidence → assess_evidence` with the
+caller's checkpointer. Assessment ends with a proposal or escalation, or routes
+through `collect_requested_evidence → assess_evidence` once. A second request for
+more evidence routes through `escalate_evidence_limit → END`.
+Input requires non-empty `incident_id` and `user_report` strings and
 `target_service` equal to `checkout` or `inventory`. Initialization adds
 `status = "investigating"`. Invalid inputs raise `ValueError` before capability reads.
 
@@ -178,7 +182,8 @@ The official MCP Python SDK v2 (`mcp>=2,<3`) provides two independently addressa
 
 All current MCP tools are read-only. The raw `/__control/*` endpoints remain
 synthetic test/demo infrastructure and are not MCP capabilities. LangGraph consumes
-the fixed reads described below. No LLM or rollback tool is introduced.
+the fixed reads described below. The reasoner receives evidence and can propose
+additional reads as data; it has no MCP tools. No rollback tool exists.
 
 Observability accepts only `service="checkout"` or `service="inventory"`.
 Deployment reads accept only `service="checkout"` (the default). Logs and deployment
@@ -237,9 +242,13 @@ through LangGraph's native runtime context rather than checkpointed state:
 
 ```python
 from incidentops.graph.runtime import IncidentRuntimeContext
+from incidentops.llm.openrouter import open_openrouter_reasoner
 from incidentops.mcp.client import open_read_capabilities
 
-async with open_read_capabilities(observability_url, operations_url) as capabilities:
+async with (
+    open_read_capabilities(observability_url, operations_url) as capabilities,
+    open_openrouter_reasoner(api_key=api_key, model=model) as reasoner,
+):
     result = await graph.ainvoke(
         {
             "incident_id": "INC-001",
@@ -247,7 +256,9 @@ async with open_read_capabilities(observability_url, operations_url) as capabili
             "target_service": "checkout",
         },
         config={"configurable": {"thread_id": "INC-001"}},
-        context=IncidentRuntimeContext(read_capabilities=capabilities),
+        context=IncidentRuntimeContext(
+            read_capabilities=capabilities, reasoner=reasoner
+        ),
     )
 ```
 
@@ -264,7 +275,9 @@ Graph state contains only incident strings and plain evidence data. Clients, URL
 and runtime context are excluded from checkpoints. PostgreSQL retains its strict
 serializer and caller-owned saver lifecycle. The original graph and PostgreSQL
 regressions use fake capabilities, keeping database-only verification independent
-of MCP. There is no LLM, diagnosis, remediation, routing, or write capability.
+of MCP and OpenRouter. The graph additionally checkpoints structured assessments,
+evidence round, terminal status, and a proposal or escalation reason. There is no
+write capability or remediation execution.
 
 Run the live graph → MCP → PostgreSQL proof and then the fully configured suite:
 
@@ -289,3 +302,75 @@ to recover the exact evidence without reconnecting to MCP. Test cleanup resets
 both synthetic services and deletes the unique checkpoint thread. Docker shutdown
 retains the database volume. No tracing or evaluation subsystem is added; existing
 SDK dependencies include LangSmith and the OpenTelemetry API transitively.
+
+## Bounded reasoning with OpenRouter
+
+`IncidentReasoner` is a run-scoped application protocol. Its sole concrete provider
+is `langchain-openrouter`'s `ChatOpenRouter`, configured explicitly with an API key
+and exactly one model. The factory uses a fixed seed (0), a 60-second model timeout,
+no LangChain or SDK retries, medium reasoning effort with returned reasoning
+excluded, and no provider fallbacks. Native strict JSON-schema output is converted
+immediately into plain dictionaries; graph-side semantic validation follows.
+No raw model responses, messages, model objects, keys, or chain-of-thought are
+checkpointed. The SDK's synchronous and asynchronous transports close on context exit.
+Temperature is omitted because GPT-6 Luna endpoints do not advertise support for
+it; sending temperature 0 with strict parameter routing yields no eligible endpoint.
+
+Assessments contain `decision`, `root_cause`, `confidence`, concise `summary`,
+`evidence_requests`, and nullable `proposed_remediation`. Decisions are
+`need_more_evidence`, `propose_remediation`, or `escalate`; root causes are
+`bad_deployment`, `downstream_failure`, or `unknown`; confidence is low/medium/high.
+Evidence requests contain only a closed capability and service. They must be
+novel, unique, compatible, and limited to 1–3 reads. Logs/deployments keep the
+application's fixed 20/10 limits. Additional collection is sequential and atomic.
+
+There are at most **two evidence rounds and two assessments**. After round 2,
+another valid evidence request causes deterministic escalation with
+`escalation_reason="evidence_budget_exhausted"`. Provider, parsing, contract, or
+missing runtime dependency failures raise application errors; they are not incident
+escalations. Successful terminal status is `action_proposed` or `escalated`.
+
+The only proposal is `rollback_deployment` for checkout. Its target must occur in
+observed checkout deployment history and differ from both the active and newest
+version. A proposal is data only: **rollback execution is not implemented yet;
+HITL is not implemented yet**. No executable tools are bound to the model.
+
+Trusted system instructions explain that operational text cannot redefine the task
+or authorize actions. A separate human/application message contains clearly labeled
+untrusted JSON evidence and the report. Suspicious text is preserved. Closed schemas,
+graph validation, and absence of execution authority provide structural boundaries;
+prompt wording and the unit tests do not establish complete prompt-injection resistance.
+
+For live verification, set `OPENROUTER_API_KEY` locally and explicitly configure
+`INCIDENTOPS_TEST_LLM_MODEL`. The recommended Task 006 model is
+`openai/gpt-6-luna`; no substitute model is selected automatically. Application
+code does not read `.env`; this optional PowerShell step loads only test configuration
+from the ignored local file without printing the key:
+
+```powershell
+foreach ($line in Get-Content -LiteralPath .env) {
+    if ($line -match '^\s*(OPENROUTER_API_KEY|INCIDENTOPS_TEST_LLM_MODEL)\s*=\s*(.*?)\s*$') {
+        $value = $Matches[2].Trim().Trim('"').Trim("'")
+        [Environment]::SetEnvironmentVariable($Matches[1], $value, 'Process')
+    }
+}
+$env:INCIDENTOPS_TEST_LLM_MODEL = 'openai/gpt-6-luna'
+docker compose up -d --build --wait
+$env:INCIDENTOPS_TEST_DATABASE_URL = 'postgresql://incidentops_dev:incidentops_dev_only@127.0.0.1:5433/incidentops_test'
+$env:INCIDENTOPS_TEST_CHECKOUT_URL = 'http://127.0.0.1:8002'
+$env:INCIDENTOPS_TEST_INVENTORY_URL = 'http://127.0.0.1:8001'
+$env:INCIDENTOPS_TEST_OBSERVABILITY_MCP_URL = 'http://127.0.0.1:8003/mcp'
+$env:INCIDENTOPS_TEST_OPERATIONS_MCP_URL = 'http://127.0.0.1:8004/mcp'
+.\.venv\Scripts\python.exe -m pytest -q -s tests/integration/test_graph_llm_reasoning.py -o cache_dir=.pytest-tmp-task006-cache
+.\.venv\Scripts\python.exe -m pytest -q --basetemp=.pytest-tmp-task006-full -o cache_dir=.pytest-tmp-task006-cache
+docker compose down
+Remove-Item Env:OPENROUTER_API_KEY, Env:INCIDENTOPS_TEST_LLM_MODEL, Env:INCIDENTOPS_TEST_DATABASE_URL, Env:INCIDENTOPS_TEST_CHECKOUT_URL, Env:INCIDENTOPS_TEST_INVENTORY_URL, Env:INCIDENTOPS_TEST_OBSERVABILITY_MCP_URL, Env:INCIDENTOPS_TEST_OPERATIONS_MCP_URL -ErrorAction SilentlyContinue
+```
+
+The live test skips only when the API key is absent; with a key, missing model/URL
+configuration or a configured provider failure fails. It prepares real checkout v2
+errors, reads evidence through MCP, obtains a real structured rollback-to-v1 proposal,
+and independently verifies checkout remains on v2 and still returns 500. It then
+closes runtime A's MCP/model/saver/event loop and recovers the entire structured
+state in runtime B without MCP or LLM connections. Raw controls remain test setup
+and cleanup only. The Task 005 live data-plane regression uses a fake reasoner.

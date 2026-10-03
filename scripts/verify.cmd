@@ -21,13 +21,14 @@ set INCIDENTOPS_TEST_INVENTORY_URL=http://127.0.0.1:8001
 set INCIDENTOPS_TEST_CHECKOUT_URL=http://127.0.0.1:8002
 set INCIDENTOPS_TEST_OBSERVABILITY_MCP_URL=http://127.0.0.1:8003/mcp
 set INCIDENTOPS_TEST_OPERATIONS_MCP_URL=http://127.0.0.1:8004/mcp
+set INCIDENTOPS_TEST_LLM_MODEL=openai/gpt-6-luna
 
 echo.
 echo ========================================
 echo [3/6] Running tests
 echo ========================================
 
-".venv\Scripts\python.exe" -m pytest -q
+".venv\Scripts\python.exe" -m pytest -q -rs
 if errorlevel 1 goto :fail
 
 echo.

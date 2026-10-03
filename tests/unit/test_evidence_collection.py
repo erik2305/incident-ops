@@ -50,7 +50,7 @@ def test_exact_initial_reads_and_untrusted_evidence(
         "status": "healthy",
     }
     assert result["evidence"][1]["data"] == {"requests_total": 3, "requests_5xx": 1}
-    assert result["status"] == "investigating"
+    assert result["status"] == "escalated"
 
 
 def test_suspicious_text_stays_untrusted_data(read_capabilities, incident_runtime):

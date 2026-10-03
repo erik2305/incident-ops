@@ -42,7 +42,7 @@ def thread_ids(database_url):
     run_async(cleanup())
 
 
-async def write_incidents(database_url, incidents, read_capabilities):
+async def write_incidents(database_url, incidents, read_capabilities, reasoner):
     # No graph, saver, or connection escapes this function's lifecycle A.
     async with open_checkpointer(database_url) as checkpointer:
         graph = build_graph(checkpointer=checkpointer)
@@ -52,10 +52,12 @@ async def write_incidents(database_url, incidents, read_capabilities):
             result = await graph.ainvoke(
                 incident,
                 config=config,
-                context=IncidentRuntimeContext(read_capabilities=read_capabilities),
+                context=IncidentRuntimeContext(
+                    read_capabilities=read_capabilities, reasoner=reasoner
+                ),
             )
             assert all(result[field] == value for field, value in incident.items())
-            assert result["status"] == "investigating"
+            assert result["status"] == "escalated"
             assert len(result["evidence"]) == 4
             written.append(result)
             assert (await graph.aget_state(config)).next == ()
@@ -86,24 +88,30 @@ def new_incident(thread_ids, prefix, report):
     }
 
 
-def test_state_survives_closed_runtime(database_url, thread_ids, read_capabilities):
+def test_state_survives_closed_runtime(
+    database_url, thread_ids, read_capabilities, reasoner
+):
     incident = new_incident(
         thread_ids, "INC-PERSIST-001", "Checkout is returning HTTP 500 responses."
     )
 
-    written = run_async(write_incidents(database_url, [incident], read_capabilities))
+    written = run_async(
+        write_incidents(database_url, [incident], read_capabilities, reasoner)
+    )
     # The writer's event loop and connection are both closed before reopening.
     restored = run_async(read_incidents(database_url, thread_ids))
 
     assert restored == written
 
 
-def test_durable_threads_are_isolated(database_url, thread_ids, read_capabilities):
+def test_durable_threads_are_isolated(
+    database_url, thread_ids, read_capabilities, reasoner
+):
     first = new_incident(thread_ids, "INC-PERSIST-A", "Checkout is failing.")
     second = new_incident(thread_ids, "INC-PERSIST-B", "Search is timing out.")
 
     written = run_async(
-        write_incidents(database_url, [first, second], read_capabilities)
+        write_incidents(database_url, [first, second], read_capabilities, reasoner)
     )
     restored = run_async(read_incidents(database_url, thread_ids))
 
@@ -111,7 +119,7 @@ def test_durable_threads_are_isolated(database_url, thread_ids, read_capabilitie
 
 
 def test_strict_serializer_restores_builtin_state(
-    database_url, thread_ids, read_capabilities
+    database_url, thread_ids, read_capabilities, reasoner
 ):
     incident = new_incident(
         thread_ids,
@@ -119,7 +127,9 @@ def test_strict_serializer_restores_builtin_state(
         '  Checkout: HTTP 500 — café, 日本語, 🚨\n{"retry": false}  ',
     )
 
-    written = run_async(write_incidents(database_url, [incident], read_capabilities))
+    written = run_async(
+        write_incidents(database_url, [incident], read_capabilities, reasoner)
+    )
     restored = run_async(read_incidents(database_url, thread_ids))
 
     assert restored == written

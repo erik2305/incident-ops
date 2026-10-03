@@ -1,9 +1,35 @@
 """Fake reads keep graph and checkpoint regression tests infrastructure-specific."""
 
+from pathlib import Path
+
 import pytest
+from dotenv import load_dotenv
 
 from incidentops.domain.capabilities import ReadCapabilityError
 from incidentops.graph.runtime import IncidentRuntimeContext
+
+load_dotenv(Path(__file__).resolve().parents[1] / ".env")
+
+
+def escalation_assessment():
+    return {
+        "decision": "escalate",
+        "root_cause": "unknown",
+        "confidence": "low",
+        "summary": "Fake reasoner terminates the infrastructure regression.",
+        "evidence_requests": [],
+        "proposed_remediation": None,
+    }
+
+
+class FakeReasoner:
+    def __init__(self, assessments=None):
+        self.assessments = assessments or [escalation_assessment()]
+        self.calls = []
+
+    async def assess(self, **kwargs):
+        self.calls.append(kwargs)
+        return self.assessments[min(len(self.calls) - 1, len(self.assessments) - 1)]
 
 
 class FakeReadCapabilities:
@@ -54,5 +80,12 @@ def read_capabilities():
 
 
 @pytest.fixture
-def incident_runtime(read_capabilities):
-    return IncidentRuntimeContext(read_capabilities=read_capabilities)
+def reasoner():
+    return FakeReasoner()
+
+
+@pytest.fixture
+def incident_runtime(read_capabilities, reasoner):
+    return IncidentRuntimeContext(
+        read_capabilities=read_capabilities, reasoner=reasoner
+    )

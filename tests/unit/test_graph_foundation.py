@@ -35,7 +35,7 @@ def test_successful_execution_reaches_end(graph, invoke):
     result = invoke(incident, config)
 
     assert all(result[field] == value for field, value in incident.items())
-    assert result["status"] == "investigating"
+    assert result["status"] == "escalated"
     assert len(result["evidence"]) == 4
     assert graph.get_state(config).next == ()
 
@@ -59,6 +59,9 @@ def test_checkpoint_contains_initialized_state(graph, invoke):
         "target_service",
         "status",
         "evidence",
+        "evidence_round",
+        "assessment_history",
+        "escalation_reason",
     }
     assert snapshot.config["configurable"]["thread_id"] == "INC-001"
 

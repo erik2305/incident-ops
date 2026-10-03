@@ -5,3 +5,4 @@
 **/*.egg-info/
 .pytest*/
 .ruff_cache/
+.env

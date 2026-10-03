@@ -36,7 +36,7 @@ def environment():
     return values
 
 
-async def runtime_a(environment, incident, config):
+async def runtime_a(environment, incident, config, reasoner):
     await setup_checkpoints(environment["database"])
     async with open_checkpointer(environment["database"]) as checkpointer:
         graph = build_graph(checkpointer=checkpointer)
@@ -46,7 +46,9 @@ async def runtime_a(environment, incident, config):
             result = await graph.ainvoke(
                 incident,
                 config=config,
-                context=IncidentRuntimeContext(read_capabilities=capabilities),
+                context=IncidentRuntimeContext(
+                    read_capabilities=capabilities, reasoner=reasoner
+                ),
             )
             assert (await graph.aget_state(config)).next == ()
             return result
@@ -62,7 +64,7 @@ async def runtime_b(database_url, config):
         return snapshot.values
 
 
-def test_live_mcp_evidence_survives_closed_runtime(environment):
+def test_live_mcp_evidence_survives_closed_runtime(environment, reasoner):
     incident = {
         "incident_id": f"INC-GRAPH-MCP-{uuid4().hex}",
         "user_report": "Checkout is returning HTTP 500 responses after a deployment.",
@@ -90,8 +92,8 @@ def test_live_mcp_evidence_survives_closed_runtime(environment):
                 == 500
             )
 
-            written = run_async(runtime_a(environment, incident, config))
-            assert written["status"] == "investigating"
+            written = run_async(runtime_a(environment, incident, config, reasoner))
+            assert written["status"] == "escalated"
             evidence = {item["capability"]: item for item in written["evidence"]}
             assert set(evidence) == {
                 "get_service_health",
@@ -129,6 +131,9 @@ def test_live_mcp_evidence_survives_closed_runtime(environment):
                 "target_service",
                 "status",
                 "evidence",
+                "evidence_round",
+                "assessment_history",
+                "escalation_reason",
             }
             serialized = json.dumps(restored, allow_nan=False)
             assert environment["observability"] not in serialized
