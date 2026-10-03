@@ -22,12 +22,14 @@ git diff --check
 ## Graph contract
 
 `incidentops.graph.build_graph(checkpointer=...)` compiles
-`START → initialize_incident → END` with the caller's checkpointer.
-Input requires non-empty `incident_id` and `user_report` strings; initialization
-adds `status = "investigating"`. Whitespace-only inputs raise `ValueError`.
+`START → initialize_incident → collect_initial_evidence → END` with the caller's
+checkpointer. Input requires non-empty `incident_id` and `user_report` strings and
+`target_service` equal to `checkout` or `inventory`. Initialization adds
+`status = "investigating"`. Invalid inputs raise `ValueError` before capability reads.
 
 The caller supplies `config={"configurable": {"thread_id": "INC-001"}}` to
-`graph.invoke(...)` and can inspect checkpoints using `graph.get_state(config)`.
+`await graph.ainvoke(..., context=IncidentRuntimeContext(...))` and can inspect
+checkpoints using `await graph.aget_state(config)` without an MCP runtime context.
 The eventual architecture uses `thread_id = incident_id`; this slice does not
 enforce that identity. Unit tests supply `InMemorySaver`; PostgreSQL checkpointing
 uses the official `AsyncPostgresSaver`. The Phase 0 decisions are in `docs/adr/`.
@@ -175,8 +177,8 @@ The official MCP Python SDK v2 (`mcp>=2,<3`) provides two independently addressa
 | `operations-mcp` | `http://127.0.0.1:8004/mcp` | `get_recent_deployments` |
 
 All current MCP tools are read-only. The raw `/__control/*` endpoints remain
-synthetic test/demo infrastructure and are not MCP capabilities. LangGraph and
-LLMs do not consume MCP yet. No rollback tool is registered.
+synthetic test/demo infrastructure and are not MCP capabilities. LangGraph consumes
+the fixed reads described below. No LLM or rollback tool is introduced.
 
 Observability accepts only `service="checkout"` or `service="inventory"`.
 Deployment reads accept only `service="checkout"` (the default). Logs and deployment
@@ -224,3 +226,66 @@ Remove-Item Env:INCIDENTOPS_TEST_OBSERVABILITY_MCP_URL, Env:INCIDENTOPS_TEST_OPE
 ```
 
 The existing PostgreSQL volume is retained.
+
+## Graph evidence collection and persistence
+
+The application-facing `ReadCapabilities` protocol exposes only four named async
+methods. `open_read_capabilities` owns two official SDK clients for one graph run,
+reuses their connections, disables tool caching, and closes both on exit. The caller
+provides MCP URLs explicitly; the frozen `IncidentRuntimeContext` carries the adapter
+through LangGraph's native runtime context rather than checkpointed state:
+
+```python
+from incidentops.graph.runtime import IncidentRuntimeContext
+from incidentops.mcp.client import open_read_capabilities
+
+async with open_read_capabilities(observability_url, operations_url) as capabilities:
+    result = await graph.ainvoke(
+        {
+            "incident_id": "INC-001",
+            "user_report": "Checkout requests return errors",
+            "target_service": "checkout",
+        },
+        config={"configurable": {"thread_id": "INC-001"}},
+        context=IncidentRuntimeContext(read_capabilities=capabilities),
+    )
+```
+
+The evidence node reads health, metrics, and logs (limit 20), in that order, for
+either target. Checkout additionally reads recent deployments (limit 10).
+Each built-in dictionary has exactly `capability`, `service`, `data`, and
+`trust="untrusted_operational_data"`. Suspicious log text is preserved unchanged.
+The adapter checks failed MCP calls before accepting validated structured JSON;
+text content is never a fallback. A failed read raises `ReadCapabilityError` with
+a safe message. The node publishes its complete evidence list only after every
+required read succeeds, so failure leaves no partial evidence update.
+
+Graph state contains only incident strings and plain evidence data. Clients, URLs,
+and runtime context are excluded from checkpoints. PostgreSQL retains its strict
+serializer and caller-owned saver lifecycle. The original graph and PostgreSQL
+regressions use fake capabilities, keeping database-only verification independent
+of MCP. There is no LLM, diagnosis, remediation, routing, or write capability.
+
+Run the live graph → MCP → PostgreSQL proof and then the fully configured suite:
+
+```powershell
+docker compose up -d --build --wait
+$env:INCIDENTOPS_TEST_DATABASE_URL = 'postgresql://incidentops_dev:incidentops_dev_only@127.0.0.1:5433/incidentops_test'
+$env:INCIDENTOPS_TEST_CHECKOUT_URL = 'http://127.0.0.1:8002'
+$env:INCIDENTOPS_TEST_INVENTORY_URL = 'http://127.0.0.1:8001'
+$env:INCIDENTOPS_TEST_OBSERVABILITY_MCP_URL = 'http://127.0.0.1:8003/mcp'
+$env:INCIDENTOPS_TEST_OPERATIONS_MCP_URL = 'http://127.0.0.1:8004/mcp'
+.\.venv\Scripts\python.exe -m pytest -q tests/integration/test_graph_mcp_evidence.py -o cache_dir=.pytest-tmp-task005-cache
+.\.venv\Scripts\python.exe -m pytest -q --basetemp=.pytest-tmp-task005-full -o cache_dir=.pytest-tmp-task005-cache
+docker compose down
+Remove-Item Env:INCIDENTOPS_TEST_OBSERVABILITY_MCP_URL, Env:INCIDENTOPS_TEST_OPERATIONS_MCP_URL, Env:INCIDENTOPS_TEST_CHECKOUT_URL, Env:INCIDENTOPS_TEST_INVENTORY_URL, Env:INCIDENTOPS_TEST_DATABASE_URL -ErrorAction SilentlyContinue
+```
+
+The workspace-local temporary/cache paths avoid Windows permission conflicts and
+are ignored by Git. The new test prepares defective checkout v2, creates a real
+500 response, and checkpoints evidence through the graph's MCP adapter. Runtime A
+closes its clients, saver, and event loop; runtime B uses a fresh saver and graph
+to recover the exact evidence without reconnecting to MCP. Test cleanup resets
+both synthetic services and deletes the unique checkpoint thread. Docker shutdown
+retains the database volume. No tracing or evaluation subsystem is added; existing
+SDK dependencies include LangSmith and the OpenTelemetry API transitively.

@@ -7,6 +7,7 @@ from uuid import uuid4
 import pytest
 
 from incidentops.graph import build_graph
+from incidentops.graph.runtime import IncidentRuntimeContext
 from incidentops.persistence import open_checkpointer, setup_checkpoints
 
 pytestmark = pytest.mark.integration
@@ -41,15 +42,24 @@ def thread_ids(database_url):
     run_async(cleanup())
 
 
-async def write_incidents(database_url, incidents):
+async def write_incidents(database_url, incidents, read_capabilities):
     # No graph, saver, or connection escapes this function's lifecycle A.
     async with open_checkpointer(database_url) as checkpointer:
         graph = build_graph(checkpointer=checkpointer)
+        written = []
         for incident in incidents:
             config = {"configurable": {"thread_id": incident["incident_id"]}}
-            result = await graph.ainvoke(incident, config=config)
-            assert result == {**incident, "status": "investigating"}
+            result = await graph.ainvoke(
+                incident,
+                config=config,
+                context=IncidentRuntimeContext(read_capabilities=read_capabilities),
+            )
+            assert all(result[field] == value for field, value in incident.items())
+            assert result["status"] == "investigating"
+            assert len(result["evidence"]) == 4
+            written.append(result)
             assert (await graph.aget_state(config)).next == ()
+        return written
 
 
 async def read_incidents(database_url, ids):
@@ -69,42 +79,47 @@ async def read_incidents(database_url, ids):
 def new_incident(thread_ids, prefix, report):
     thread_id = f"{prefix}-{uuid4().hex}"
     thread_ids.append(thread_id)
-    return {"incident_id": thread_id, "user_report": report}
+    return {
+        "incident_id": thread_id,
+        "user_report": report,
+        "target_service": "checkout",
+    }
 
 
-def test_state_survives_closed_runtime(database_url, thread_ids):
+def test_state_survives_closed_runtime(database_url, thread_ids, read_capabilities):
     incident = new_incident(
         thread_ids, "INC-PERSIST-001", "Checkout is returning HTTP 500 responses."
     )
 
-    run_async(write_incidents(database_url, [incident]))
+    written = run_async(write_incidents(database_url, [incident], read_capabilities))
     # The writer's event loop and connection are both closed before reopening.
     restored = run_async(read_incidents(database_url, thread_ids))
 
-    assert restored == [{**incident, "status": "investigating"}]
+    assert restored == written
 
 
-def test_durable_threads_are_isolated(database_url, thread_ids):
+def test_durable_threads_are_isolated(database_url, thread_ids, read_capabilities):
     first = new_incident(thread_ids, "INC-PERSIST-A", "Checkout is failing.")
     second = new_incident(thread_ids, "INC-PERSIST-B", "Search is timing out.")
 
-    run_async(write_incidents(database_url, [first, second]))
+    written = run_async(
+        write_incidents(database_url, [first, second], read_capabilities)
+    )
     restored = run_async(read_incidents(database_url, thread_ids))
 
-    assert restored == [
-        {**first, "status": "investigating"},
-        {**second, "status": "investigating"},
-    ]
+    assert restored == written
 
 
-def test_strict_serializer_restores_builtin_state(database_url, thread_ids):
+def test_strict_serializer_restores_builtin_state(
+    database_url, thread_ids, read_capabilities
+):
     incident = new_incident(
         thread_ids,
         "INC-STRICT",
         '  Checkout: HTTP 500 — café, 日本語, 🚨\n{"retry": false}  ',
     )
 
-    run_async(write_incidents(database_url, [incident]))
+    written = run_async(write_incidents(database_url, [incident], read_capabilities))
     restored = run_async(read_incidents(database_url, thread_ids))
 
-    assert restored == [{**incident, "status": "investigating"}]
+    assert restored == written

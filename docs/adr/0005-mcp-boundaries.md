@@ -20,5 +20,6 @@ adding another integration boundary for application-owned runbooks.
 
 ## Consequences
 Task 004 exposes only read-only MCP tools backed by synthetic HTTP evidence.
-Raw synthetic controls are not MCP capabilities. Graph integration and runbook
-retrieval remain deferred.
+Raw synthetic controls are not MCP capabilities. LangGraph consumes MCP through
+a run-scoped application-side client; connections live in runtime context, never
+checkpoint state. Runbook retrieval remains deferred.
