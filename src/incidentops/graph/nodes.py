@@ -3,7 +3,19 @@
 from typing import Literal
 
 from langgraph.runtime import Runtime
+from langgraph.types import interrupt
+from pydantic import ValidationError
 
+from incidentops.domain.actions import (
+    ActionIntegrityError,
+    ApprovalDecision,
+    action_payload,
+    materialize_action,
+    valid_rollback_result,
+    validate_approval,
+    validate_pending_action,
+)
+from incidentops.domain.capabilities import WriteCapabilityError
 from incidentops.domain.models import EvidenceItem
 from incidentops.domain.reasoning import (
     ReasoningContractError,
@@ -136,3 +148,88 @@ async def collect_requested_evidence(
 def escalate_evidence_limit(state: IncidentState) -> dict:
     """Terminal application policy; makes no model or capability calls."""
     return {"status": "escalated", "escalation_reason": "evidence_budget_exhausted"}
+
+
+def prepare_action(state: IncidentState) -> dict:
+    """Pure preparation: validate the observed proposal and persist stable authority."""
+    history = state.get("assessment_history", [])
+    if not history:
+        raise ActionIntegrityError(
+            "A validated assessment is required before preparation"
+        )
+    assessment = validate_assessment(history[-1], state["evidence"])
+    proposal = assessment["proposed_remediation"]
+    if (
+        assessment["decision"] != "propose_remediation"
+        or state.get("proposal") != proposal
+    ):
+        raise ActionIntegrityError("Preparation requires the exact validated proposal")
+    pending = materialize_action(state["incident_id"], proposal)
+    if "pending_action" in state:
+        previous = validate_pending_action(
+            state["incident_id"], state["pending_action"]
+        )
+        if previous != pending:
+            raise ActionIntegrityError(
+                "Existing pending action conflicts with proposal"
+            )
+    return {"pending_action": pending, "status": "awaiting_approval"}
+
+
+def approval_gate(state: IncidentState) -> dict:
+    """Reentrant: all work before interrupt is deterministic and has no side effects."""
+    pending = validate_pending_action(state["incident_id"], state.get("pending_action"))
+    try:
+        response = interrupt(
+            {
+                "kind": "approval_required",
+                "incident_id": state["incident_id"],
+                "action_id": pending["action_id"],
+                "fingerprint": pending["fingerprint"],
+                "action": action_payload(pending),
+            },
+            response_schema=ApprovalDecision,
+        )
+        # Convert the validated response to built-ins; never catch GraphInterrupt.
+        decision = ApprovalDecision.model_validate(response).model_dump(mode="json")
+    except ValidationError:
+        raise ActionIntegrityError("Invalid approval response") from None
+    if decision["action_id"] != pending["action_id"]:
+        raise ActionIntegrityError("Approval action_id does not match pending action")
+    record = {**decision, "fingerprint": pending["fingerprint"]}
+    if "approval_record" in state and state["approval_record"] != record:
+        raise ActionIntegrityError("Conflicting approval record")
+    return {"approval_record": record}
+
+
+async def execute_action(
+    state: IncidentState, runtime: Runtime[IncidentRuntimeContext]
+) -> dict:
+    """Only persisted, integrity-checked, human-approved arguments reach a write."""
+    pending = validate_pending_action(state["incident_id"], state.get("pending_action"))
+    validate_approval(state.get("approval_record"), pending, "approve")
+    if "execution_record" in state:
+        raise ActionIntegrityError("Action already has an execution record")
+    if runtime.context is None or runtime.context.write_capabilities is None:
+        raise WriteCapabilityError("Run-scoped write_capabilities are required")
+    result = await runtime.context.write_capabilities.rollback_deployment(
+        service=pending["service"], target_version=pending["target_version"]
+    )
+    if not valid_rollback_result(result, pending["target_version"]):
+        raise WriteCapabilityError(
+            "rollback_deployment(checkout): invalid structured result"
+        )
+    return {
+        "status": "action_executed",
+        "execution_record": {
+            "action_id": pending["action_id"],
+            "fingerprint": pending["fingerprint"],
+            "result": result,
+        },
+    }
+
+
+def reject_action(state: IncidentState) -> dict:
+    pending = validate_pending_action(state["incident_id"], state.get("pending_action"))
+    validate_approval(state.get("approval_record"), pending, "reject")
+    return {"status": "escalated", "escalation_reason": "action_rejected"}

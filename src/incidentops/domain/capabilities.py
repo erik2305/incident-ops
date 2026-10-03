@@ -19,3 +19,13 @@ class ReadCapabilities(Protocol):
     async def get_recent_deployments(
         self, service: Literal["checkout"], *, limit: int = 20
     ) -> JSONData: ...
+
+
+class WriteCapabilityError(RuntimeError):
+    """A mutation integration failed; no successful execution may be recorded."""
+
+
+class WriteCapabilities(Protocol):
+    async def rollback_deployment(
+        self, *, service: Literal["checkout"], target_version: str
+    ) -> JSONData: ...

@@ -8,7 +8,8 @@ from anyio import BrokenResourceError, ClosedResourceError, EndOfStream
 from httpx2 import HTTPError
 from mcp import Client, MCPError
 
-from incidentops.domain.capabilities import ReadCapabilityError
+from incidentops.domain.actions import valid_rollback_result
+from incidentops.domain.capabilities import ReadCapabilityError, WriteCapabilityError
 from incidentops.domain.models import Capability, JSONData, Service
 
 
@@ -137,3 +138,66 @@ async def open_read_capabilities(observability_url: str, operations_url: str):
             ):
                 raise ReadCapabilityError(f"MCP {domain} connection failed") from None
         yield MCPReadCapabilities(clients[0], clients[1])
+
+
+class MCPWriteCapabilities:
+    """Write authority is separate from reads and exposes only the fixed rollback."""
+
+    def __init__(self, operations: Client):
+        self._operations = operations
+
+    async def rollback_deployment(
+        self, *, service: Literal["checkout"], target_version: str
+    ) -> JSONData:
+        if service != "checkout" or target_version not in ("v1", "v2"):
+            raise WriteCapabilityError(
+                "rollback_deployment(checkout): unsupported arguments"
+            )
+        try:
+            result = await self._operations.call_tool(
+                "rollback_deployment",
+                {"service": service, "target_version": target_version},
+            )
+        except (
+            MCPError,
+            HTTPError,
+            BrokenResourceError,
+            ClosedResourceError,
+            EndOfStream,
+            RuntimeError,
+            ExceptionGroup,
+        ):
+            raise WriteCapabilityError(
+                "rollback_deployment(checkout): MCP call failed"
+            ) from None
+        if result.is_error:
+            raise WriteCapabilityError("rollback_deployment(checkout): MCP tool failed")
+        if not valid_rollback_result(result.structured_content, target_version):
+            raise WriteCapabilityError(
+                "rollback_deployment(checkout): missing or invalid structured result"
+            )
+        return result.structured_content
+
+
+@asynccontextmanager
+async def open_write_capabilities(operations_url: str):
+    """A fresh operations-only connection, closed when this execution run ends."""
+    async with AsyncExitStack() as stack:
+        try:
+            client = await stack.enter_async_context(
+                Client(operations_url, cache=None, read_timeout_seconds=10)
+            )
+        except (
+            MCPError,
+            HTTPError,
+            BrokenResourceError,
+            ClosedResourceError,
+            EndOfStream,
+            RuntimeError,
+            ValueError,
+            ExceptionGroup,
+        ):
+            raise WriteCapabilityError(
+                "MCP operations write connection failed"
+            ) from None
+        yield MCPWriteCapabilities(client)

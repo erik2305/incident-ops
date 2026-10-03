@@ -1,7 +1,7 @@
 # IncidentOps
 
-Read-only incident investigation with structured LLM assessment and a bounded
-additional-evidence loop, orchestrated and checkpointed by LangGraph.
+Incident investigation with structured LLM assessment, a bounded evidence loop,
+and durable human approval of exact rollback actions, orchestrated by LangGraph.
 
 ## Development
 
@@ -20,11 +20,21 @@ python -m ruff format --check .
 git diff --check
 ```
 
+The accepted test harness loads the ignored root `.env` using python-dotenv.
+If it contains an OpenRouter key, supply the full live model/infrastructure
+configuration below; partial live configuration fails instead of skipping.
+For an offline full-suite run, disable `.env` loading with
+`PYTHON_DOTENV_DISABLED=1` and clear the external test configuration from that test
+process. Unit tests alone require no external configuration.
+
 ## Graph contract
 
 `incidentops.graph.build_graph(checkpointer=...)` compiles
 `START → initialize_incident → collect_initial_evidence → assess_evidence` with the
-caller's checkpointer. Assessment ends with a proposal or escalation, or routes
+caller's checkpointer. Assessment routes a proposal through
+`prepare_action → approval_gate` and interrupts for human approval. Approval resumes
+through `execute_action → END`; rejection through `reject_action → END`.
+Assessment can also end with escalation, or route
 through `collect_requested_evidence → assess_evidence` once. A second request for
 more evidence routes through `escalate_evidence_limit → END`.
 Input requires non-empty `incident_id` and `user_report` strings and
@@ -84,7 +94,7 @@ the integration tests use `asyncio.Runner(loop_factory=asyncio.SelectorEventLoop
 ## Synthetic checkout environment
 
 The synthetic environment comprises `postgres`, `inventory`, and `checkout`.
-The full Compose environment also includes the two read-only MCP servers below.
+The full Compose environment also includes the two MCP servers below.
 The two target applications use a shared small Dockerfile with
 service-specific source files, Python 3.13, FastAPI, Uvicorn (one worker), and HTTPX.
 They keep their runtime state in memory, independently of LangGraph/PostgreSQL.
@@ -170,7 +180,7 @@ Remove-Item Env:INCIDENTOPS_TEST_CHECKOUT_URL, Env:INCIDENTOPS_TEST_INVENTORY_UR
 All exposed ports bind to loopback: inventory `8001`, checkout `8002`, PostgreSQL
 `5433`. Shutdown retains the PostgreSQL data volume.
 
-## Read-only MCP capabilities
+## MCP capabilities
 
 The official MCP Python SDK v2 (`mcp>=2,<3`) provides two independently addressable
 `MCPServer` processes over Streamable HTTP:
@@ -178,12 +188,13 @@ The official MCP Python SDK v2 (`mcp>=2,<3`) provides two independently addressa
 | Server | Loopback MCP endpoint | Exact tools |
 | --- | --- | --- |
 | `observability-mcp` | `http://127.0.0.1:8003/mcp` | `get_service_health`, `get_metrics`, `query_logs` |
-| `operations-mcp` | `http://127.0.0.1:8004/mcp` | `get_recent_deployments` |
+| `operations-mcp` | `http://127.0.0.1:8004/mcp` | `get_recent_deployments`, `rollback_deployment` |
 
-All current MCP tools are read-only. The raw `/__control/*` endpoints remain
-synthetic test/demo infrastructure and are not MCP capabilities. LangGraph consumes
-the fixed reads described below. The reasoner receives evidence and can propose
-additional reads as data; it has no MCP tools. No rollback tool exists.
+Observability and deployment reads remain read-only. Operations also exposes the
+single fixed checkout rollback mutation. Raw deploy/reset controls remain synthetic
+test infrastructure; the rollback tool uses only `/__control/rollback` internally.
+The reasoner receives evidence and can propose additional reads and rollback as
+data; it has no MCP tools. Read and write application contracts remain separate.
 
 Observability accepts only `service="checkout"` or `service="inventory"`.
 Deployment reads accept only `service="checkout"` (the default). Logs and deployment
@@ -277,7 +288,7 @@ serializer and caller-owned saver lifecycle. The original graph and PostgreSQL
 regressions use fake capabilities, keeping database-only verification independent
 of MCP and OpenRouter. The graph additionally checkpoints structured assessments,
 evidence round, terminal status, and a proposal or escalation reason. There is no
-write capability or remediation execution.
+model execution authority. The approval/execution phase is described below.
 
 Run the live graph → MCP → PostgreSQL proof and then the fully configured suite:
 
@@ -328,12 +339,13 @@ There are at most **two evidence rounds and two assessments**. After round 2,
 another valid evidence request causes deterministic escalation with
 `escalation_reason="evidence_budget_exhausted"`. Provider, parsing, contract, or
 missing runtime dependency failures raise application errors; they are not incident
-escalations. Successful terminal status is `action_proposed` or `escalated`.
+escalations. A valid proposal continues to `awaiting_approval`; successful execution
+ends with `action_executed`, and rejection/escalation ends with `escalated`.
 
 The only proposal is `rollback_deployment` for checkout. Its target must occur in
 observed checkout deployment history and differ from both the active and newest
-version. A proposal is data only: **rollback execution is not implemented yet;
-HITL is not implemented yet**. No executable tools are bound to the model.
+version. A proposal is data only until a human approves the exact persisted action.
+Rollback and HITL are implemented. No executable tools are bound to the model.
 
 Trusted system instructions explain that operational text cannot redefine the task
 or authorize actions. A separate human/application message contains clearly labeled
@@ -344,8 +356,8 @@ prompt wording and the unit tests do not establish complete prompt-injection res
 For live verification, set `OPENROUTER_API_KEY` locally and explicitly configure
 `INCIDENTOPS_TEST_LLM_MODEL`. The recommended Task 006 model is
 `openai/gpt-6-luna`; no substitute model is selected automatically. Application
-code does not read `.env`; this optional PowerShell step loads only test configuration
-from the ignored local file without printing the key:
+code does not read `.env`; pytest infrastructure loads it. This optional PowerShell
+step also loads test configuration into the shell without printing the key:
 
 ```powershell
 foreach ($line in Get-Content -LiteralPath .env) {
@@ -370,7 +382,92 @@ Remove-Item Env:OPENROUTER_API_KEY, Env:INCIDENTOPS_TEST_LLM_MODEL, Env:INCIDENT
 The live test skips only when the API key is absent; with a key, missing model/URL
 configuration or a configured provider failure fails. It prepares real checkout v2
 errors, reads evidence through MCP, obtains a real structured rollback-to-v1 proposal,
+materializes its exact pending action and pauses at the approval interrupt,
 and independently verifies checkout remains on v2 and still returns 500. It then
 closes runtime A's MCP/model/saver/event loop and recovers the entire structured
 state in runtime B without MCP or LLM connections. Raw controls remain test setup
 and cleanup only. The Task 005 live data-plane regression uses a fake reasoner.
+
+## Durable exact-action approval and rollback
+
+`prepare_action` revalidates the observed proposal and deterministically persists
+`pending_action` before `approval_gate` interrupts. The pending action contains
+only `action_id`, `fingerprint`, `action`, `service`, and `target_version`.
+The fingerprint is SHA-256 of the executable payload serialized as sorted-key JSON
+with stable separators and UTF-8. The action ID hashes a fixed versioned namespace,
+incident ID, and fingerprint. Display text is excluded. The same incident/action
+has the same identity; conflicting existing actions fail instead of being replaced.
+
+The interrupt displays `kind="approval_required"`, incident ID, action ID,
+fingerprint, and the exact persisted action payload. Its response schema permits
+only `decision="approve"|"reject"` and `action_id`. Replacement arguments or a
+human-supplied fingerprint are rejected. The gate performs only deterministic
+integrity checks and payload construction before `interrupt()`, so re-entry is safe.
+
+After the original runtime closes, open a fresh saver/graph using the same thread.
+An externally supplied human decision resumes the graph directly:
+
+```python
+from langgraph.types import Command
+from incidentops.graph.runtime import IncidentRuntimeContext
+from incidentops.mcp.client import open_write_capabilities
+
+# approval_decision contains only the human's approve/reject and persisted action_id.
+async with open_write_capabilities(operations_url) as writes:
+    result = await graph.ainvoke(
+        Command(resume=approval_decision),
+        config={"configurable": {"thread_id": incident_id}},
+        context=IncidentRuntimeContext(write_capabilities=writes),
+    )
+
+# For rejection, use Command(resume=approval_decision) with no runtime context.
+```
+
+Reject resumes require no MCP, model, or write dependency and retain the pending
+action/approval for audit. They end with `escalated`, `action_rejected`. Approve
+resumes require only a fresh operations write client: no read MCP or LLM. The
+executor checks action identity and both persisted fingerprints, rejects an
+existing execution record, then calls rollback using only PendingAction arguments.
+No reasoning or evidence read occurs between approval and mutation. Successful
+execution stores a plain structured result with the same action ID/fingerprint.
+Write failures raise `WriteCapabilityError`, create no success record, and receive
+no automatic retry or incident-escalation substitution.
+
+The MCP rollback accepts only checkout and target `v1`/`v2`; unknown or surplus
+arguments fail. Its structured result contains `service`, `previous_version`,
+`active_version`, `target_version`, and `applied`. It is annotated non-read-only,
+destructive, idempotent, and closed-world. These annotations are metadata;
+IncidentOps/LangGraph enforces approval. The synthetic primitive checks deployment
+eligibility under the service lock. At the existing target it returns `applied=false`
+without another history event; otherwise it changes version and appends one event.
+
+The application execution guard prevents a second successful write. Primitive
+idempotency covers a narrow mutation-before-checkpoint crash window. Neither is a
+distributed exactly-once guarantee. SHA-256 detects internal payload drift, not
+tampering by an administrator who can rewrite both payload and hashes. Operations
+MCP is an internal endpoint without authentication/RBAC; direct hostile network
+access is outside this MVP threat model. The security claim is that the IncidentOps
+graph never invokes rollback before valid human approval, not that every possible
+network client is prevented from invoking the internal capability.
+
+Rollback is implemented and human approval is required. Post-action verification,
+a resolved state, and FastAPI/SSE approval transport are not implemented yet.
+Independent test assertions checking recovery are not graph verification nodes.
+
+With the five infrastructure URLs above configured, explicitly verify both layers:
+
+```powershell
+.\.venv\Scripts\python.exe -m pytest -q tests/integration/test_mcp_rollback.py -o cache_dir=.pytest-tmp-task007-cache
+.\.venv\Scripts\python.exe -m pytest -q tests/integration/test_graph_hitl.py -o cache_dir=.pytest-tmp-task007-cache
+# Also configure the ignored OpenRouter key and explicit model as shown above.
+.\.venv\Scripts\python.exe -m pytest -q -s tests/integration/test_graph_llm_reasoning.py -o cache_dir=.pytest-tmp-task007-cache
+.\.venv\Scripts\python.exe -m pytest -q --basetemp=.pytest-tmp-task007-full -o cache_dir=.pytest-tmp-task007-cache
+docker compose down
+```
+
+The durable HITL test uses real PostgreSQL/MCP and a deterministic fake reasoner.
+Runtime A investigates and closes at the persisted interrupt while checkout still
+fails on v2. Fresh runtime B approves with write authority only and performs the
+real rollback; fresh runtime C recovers the action, approval, and execution with
+no MCP/LLM. The separate live OpenRouter test stops at approval and never auto-approves.
+Tests reset synthetic services and delete unique threads. Shutdown retains the volume.

@@ -8,11 +8,11 @@ from incidentops.graph.routing import route_assessment
 @pytest.mark.parametrize(
     ("decision", "round_number", "route"),
     [
-        ("propose_remediation", 1, "end"),
+        ("propose_remediation", 1, "prepare"),
         ("escalate", 1, "end"),
         ("need_more_evidence", 1, "collect"),
         ("need_more_evidence", 2, "limit"),
-        ("propose_remediation", 2, "end"),
+        ("propose_remediation", 2, "prepare"),
         ("escalate", 2, "end"),
     ],
 )

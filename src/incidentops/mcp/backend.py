@@ -9,6 +9,8 @@ import httpx
 from mcp.server.mcpserver.exceptions import ToolError
 from pydantic import Field
 
+from incidentops.domain.actions import valid_rollback_result
+
 Service = Literal["checkout", "inventory"]
 Endpoint = Literal["health", "metrics", "logs", "deployments"]
 EvidenceLimit = Annotated[int, Field(ge=1, le=100, strict=True)]
@@ -76,6 +78,33 @@ class HTTPBackend:
     def __init__(self, client: httpx.AsyncClient, urls: dict[Service, str]):
         self.client = client
         self.urls = urls
+
+    async def rollback_deployment(
+        self, service: Literal["checkout"], target_version: Literal["v1", "v2"]
+    ) -> dict:
+        if service != "checkout" or target_version not in ("v1", "v2"):
+            raise ToolError("Unsupported rollback arguments")
+        try:
+            response = await self.client.post(
+                f"{self.urls['checkout']}/__control/rollback",
+                json={"target_version": target_version},
+            )
+            response.raise_for_status()
+        except httpx.TimeoutException:
+            raise ToolError("checkout rollback timed out") from None
+        except httpx.RequestError:
+            raise ToolError("checkout rollback is unavailable") from None
+        except httpx.HTTPStatusError as error:
+            raise ToolError(
+                f"checkout rollback returned HTTP {error.response.status_code}"
+            ) from None
+        try:
+            data = response.json()
+        except ValueError:
+            raise ToolError("checkout rollback returned invalid JSON") from None
+        if not valid_rollback_result(data, target_version):
+            raise ToolError("checkout rollback returned unexpected JSON")
+        return data
 
     async def read(self, service: Service, endpoint: Endpoint) -> Any:
         if service not in self.urls:

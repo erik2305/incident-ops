@@ -64,18 +64,26 @@ def test_exact_read_only_tool_sets(endpoints):
     async def verify():
         expected = {
             "observability": {"get_service_health", "get_metrics", "query_logs"},
-            "operations": {"get_recent_deployments"},
+            "operations": {"get_recent_deployments", "rollback_deployment"},
         }
         for domain, names in expected.items():
             async with Client(endpoints[domain], cache=None) as client:
                 tools = (await client.list_tools()).tools
                 assert {tool.name for tool in tools} == names
                 for tool in tools:
-                    assert tool.annotations.read_only_hint is True
+                    if tool.name == "rollback_deployment":
+                        assert tool.annotations.read_only_hint is False
+                        assert tool.annotations.destructive_hint is True
+                        assert tool.annotations.idempotent_hint is True
+                    else:
+                        assert tool.annotations.read_only_hint is True
                     assert tool.annotations.open_world_hint is False
                     assert tool.output_schema is not None
                     properties = tool.input_schema["properties"]
-                    assert set(properties) <= {"service", "limit"}
+                    assert set(properties) <= {"service", "limit", "target_version"}
+                    if tool.name == "rollback_deployment":
+                        assert set(properties) == {"service", "target_version"}
+                        assert set(properties["target_version"]["enum"]) == {"v1", "v2"}
                     service_schema = properties["service"]
                     if domain == "observability":
                         assert set(service_schema["enum"]) == {"checkout", "inventory"}

@@ -1,5 +1,6 @@
 """Fake reads keep graph and checkpoint regression tests infrastructure-specific."""
 
+import os
 from pathlib import Path
 
 import pytest
@@ -82,6 +83,23 @@ def read_capabilities():
 @pytest.fixture
 def reasoner():
     return FakeReasoner()
+
+
+@pytest.fixture
+def rollback_environment():
+    names = {
+        "database": "INCIDENTOPS_TEST_DATABASE_URL",
+        "checkout": "INCIDENTOPS_TEST_CHECKOUT_URL",
+        "inventory": "INCIDENTOPS_TEST_INVENTORY_URL",
+        "observability": "INCIDENTOPS_TEST_OBSERVABILITY_MCP_URL",
+        "operations": "INCIDENTOPS_TEST_OPERATIONS_MCP_URL",
+    }
+    values = {name: os.environ.get(variable) for name, variable in names.items()}
+    if not any(values.values()):
+        pytest.skip("Configure database, synthetic service and MCP test URLs")
+    if not all(values.values()):
+        pytest.fail("Rollback integration requires all five infrastructure URLs")
+    return values
 
 
 @pytest.fixture

@@ -7,8 +7,13 @@ from unittest.mock import AsyncMock
 import pytest
 from mcp import MCPError
 
-from incidentops.domain.capabilities import ReadCapabilityError
-from incidentops.mcp.client import MCPReadCapabilities, open_read_capabilities
+from incidentops.domain.capabilities import ReadCapabilityError, WriteCapabilityError
+from incidentops.mcp.client import (
+    MCPReadCapabilities,
+    MCPWriteCapabilities,
+    open_read_capabilities,
+    open_write_capabilities,
+)
 
 
 @pytest.mark.parametrize(
@@ -193,5 +198,94 @@ def test_caller_exception_still_closes_both_clients(connected_clients):
             ):
                 raise ValueError("caller failure")
         assert all(not client.connected for client in instances)
+
+    asyncio.run(verify())
+
+
+def rollback_result():
+    return {
+        "service": "checkout",
+        "previous_version": "v2",
+        "active_version": "v1",
+        "target_version": "v1",
+        "applied": True,
+    }
+
+
+def test_write_adapter_uses_only_exact_rollback_arguments():
+    data = rollback_result()
+    client = SimpleNamespace(
+        call_tool=AsyncMock(
+            return_value=SimpleNamespace(is_error=False, structured_content=data)
+        )
+    )
+    assert (
+        asyncio.run(
+            MCPWriteCapabilities(client).rollback_deployment(
+                service="checkout", target_version="v1"
+            )
+        )
+        == data
+    )
+    client.call_tool.assert_awaited_once_with(
+        "rollback_deployment", {"service": "checkout", "target_version": "v1"}
+    )
+
+
+@pytest.mark.parametrize(
+    ("is_error", "data"),
+    [
+        (True, rollback_result()),
+        (False, None),
+        (False, {}),
+        (False, {**rollback_result(), "active_version": "v2"}),
+        (False, {**rollback_result(), "applied": "true"}),
+        (False, {**rollback_result(), "runtime_object": object()}),
+    ],
+)
+def test_write_error_or_invalid_structured_result_never_succeeds(is_error, data):
+    client = SimpleNamespace(
+        call_tool=AsyncMock(
+            return_value=SimpleNamespace(
+                is_error=is_error,
+                structured_content=data,
+                content=[{"text": "success"}],
+            )
+        )
+    )
+    with pytest.raises(WriteCapabilityError):
+        asyncio.run(
+            MCPWriteCapabilities(client).rollback_deployment(
+                service="checkout", target_version="v1"
+            )
+        )
+
+
+def test_write_protocol_failure_is_normalized():
+    client = SimpleNamespace(
+        call_tool=AsyncMock(
+            side_effect=MCPError(code=-32603, message="secret transport details")
+        )
+    )
+    with pytest.raises(WriteCapabilityError) as error:
+        asyncio.run(
+            MCPWriteCapabilities(client).rollback_deployment(
+                service="checkout", target_version="v1"
+            )
+        )
+    assert "secret" not in str(error.value)
+
+
+def test_write_context_connects_only_operations_and_closes_on_caller_failure(
+    connected_clients,
+):
+    instances, _ = connected_clients
+
+    async def verify():
+        with pytest.raises(ValueError, match="caller failure"):
+            async with open_write_capabilities("http://operations/mcp"):
+                assert len(instances) == 1 and instances[0].connected
+                raise ValueError("caller failure")
+        assert not instances[0].connected
 
     asyncio.run(verify())

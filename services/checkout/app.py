@@ -10,7 +10,7 @@ from typing import Literal
 import httpx
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 
 def timestamp():
@@ -20,6 +20,7 @@ def timestamp():
 def reset_state(state):
     # Called at startup or while holding the request/deployment lock.
     state.active_version = "v1"
+    state.deployed_versions = {"v1"}
     state.deployment_history = deque(
         [{"version": "v1", "timestamp": timestamp()}], maxlen=100
     )
@@ -51,6 +52,11 @@ class CheckoutInput(BaseModel):
 
 class DeploymentInput(BaseModel):
     version: Literal["v1", "v2"]
+
+
+class RollbackInput(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+    target_version: Literal["v1", "v2"]
 
 
 def record(state, level, message, event, **fields):
@@ -203,6 +209,7 @@ async def deploy(payload: DeploymentInput, request: Request):
     state = request.app.state
     async with state.lock:
         state.active_version = payload.version
+        state.deployed_versions.add(payload.version)
         state.deployment_history.append(
             {"version": payload.version, "timestamp": timestamp()}
         )
@@ -215,3 +222,28 @@ async def reset(request: Request):
     async with state.lock:
         reset_state(state)
     return {"status": "reset", "active_version": "v1"}
+
+
+@app.post("/__control/rollback")
+async def rollback(payload: RollbackInput, request: Request):
+    state = request.app.state
+    async with state.lock:
+        if payload.target_version not in state.deployed_versions:
+            return JSONResponse(
+                {"detail": "Rollback target was not previously deployed"},
+                status_code=409,
+            )
+        previous = state.active_version
+        applied = previous != payload.target_version
+        if applied:
+            state.active_version = payload.target_version
+            state.deployment_history.append(
+                {"version": payload.target_version, "timestamp": timestamp()}
+            )
+        return {
+            "service": "checkout",
+            "previous_version": previous,
+            "active_version": state.active_version,
+            "target_version": payload.target_version,
+            "applied": applied,
+        }

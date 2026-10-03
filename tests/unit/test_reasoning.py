@@ -79,18 +79,18 @@ def scenario(read_capabilities, reasoner, monkeypatch):
     return run, graph, config
 
 
-def test_direct_proposal_terminates_without_extra_reads(
+def test_direct_proposal_pauses_without_extra_reads(
     scenario, reasoner, read_capabilities
 ):
     reasoner.assessments = [proposal()]
     run, graph, config = scenario
     result = run()
-    assert result["status"] == "action_proposed"
+    assert result["status"] == "awaiting_approval"
     assert result["proposal"] == proposal()["proposed_remediation"]
     assert result["evidence_round"] == 1
     assert len(reasoner.calls) == len(result["assessment_history"]) == 1
     assert len(read_capabilities.calls) == 4
-    assert graph.get_state(config).next == ()
+    assert graph.get_state(config).next == ("approval_gate",)
 
 
 def test_one_real_graph_cycle_appends_untrusted_evidence(
@@ -99,7 +99,7 @@ def test_one_real_graph_cycle_appends_untrusted_evidence(
     reasoner.assessments = [more("get_service_health", "get_metrics"), proposal()]
     run, graph, config = scenario
     result = run()
-    assert result["status"] == "action_proposed"
+    assert result["status"] == "awaiting_approval"
     assert result["evidence_round"] == 2
     assert len(reasoner.calls) == len(result["assessment_history"]) == 2
     assert [call["evidence_round"] for call in reasoner.calls] == [1, 2]
@@ -112,7 +112,7 @@ def test_one_real_graph_cycle_appends_untrusted_evidence(
     assert all(
         item["trust"] == "untrusted_operational_data" for item in result["evidence"]
     )
-    assert graph.get_state(config).next == ()
+    assert graph.get_state(config).next == ("approval_gate",)
 
 
 def test_second_evidence_request_forces_terminal_budget_escalation(

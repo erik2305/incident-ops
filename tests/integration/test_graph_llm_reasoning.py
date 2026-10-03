@@ -63,15 +63,31 @@ async def write_runtime(environment, incident, config):
                     read_capabilities=capabilities, reasoner=reasoner
                 ),
             )
-            assert (await graph.aget_state(config)).next == ()
-            return result
+            snapshot = await graph.aget_state(config)
+            assert snapshot.next == ("approval_gate",)
+            assert len(snapshot.interrupts) == 1
+            request = snapshot.interrupts[0].value
+            assert (
+                request["action_id"] == snapshot.values["pending_action"]["action_id"]
+            )
+            assert (
+                request["fingerprint"]
+                == snapshot.values["pending_action"]["fingerprint"]
+            )
+            assert request["action"] == snapshot.values["proposal"]
+            assert result["__interrupt__"][0].value == request
+            return snapshot.values
 
 
 async def read_runtime(database, config):
     async with open_checkpointer(database) as saver:
         graph = build_graph(checkpointer=saver)
         snapshot = await graph.aget_state(config)
-        assert snapshot.next == ()
+        assert snapshot.next == ("approval_gate",)
+        assert (
+            snapshot.interrupts[0].value["action_id"]
+            == snapshot.values["pending_action"]["action_id"]
+        )
         return snapshot.values
 
 
@@ -98,7 +114,10 @@ def test_live_reasoning_proposes_without_execution_and_persists(live_environment
             order = {"sku": "SKU-001", "quantity": 2}
             assert checkout.post("/checkout", json=order).status_code == 500
             written = run_async(write_runtime(env, incident, config))
-            assert written["status"] == "action_proposed"
+            assert written["status"] == "awaiting_approval"
+            assert (
+                "approval_record" not in written and "execution_record" not in written
+            )
             assert written["assessment_history"][-1]["root_cause"] == "bad_deployment"
             assert written["proposal"] == {
                 "action": "rollback_deployment",
@@ -128,6 +147,7 @@ def test_live_reasoning_proposes_without_execution_and_persists(live_environment
                 "evidence_round",
                 "assessment_history",
                 "proposal",
+                "pending_action",
             }
             serialized = json.dumps(restored, allow_nan=False)
             assert (

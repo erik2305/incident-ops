@@ -1,11 +1,11 @@
-"""Deployment reads only; synthetic control operations are not MCP tools."""
+"""Internal deployment reads and one explicit rollback capability."""
 
 import os
 from typing import Any, Literal
 
 from mcp.server import MCPServer
 from mcp.server.mcpserver import Context
-from mcp.types import ToolAnnotations
+from mcp.types import CallToolResult, TextContent, ToolAnnotations
 
 from incidentops.mcp.backend import (
     EvidenceLimit,
@@ -22,6 +22,31 @@ def create_server(checkout_base_url: str) -> MCPServer:
         subscriptions=False,
     )
 
+    async def rollback_arguments_only(ctx, call_next):
+        # SDK function signatures otherwise ignore surplus arguments. Reject them
+        # for the sole mutation instead of silently accepting a URL/body/path.
+        if (
+            ctx.method == "tools/call"
+            and ctx.params.get("name") == "rollback_deployment"
+        ):
+            arguments = ctx.params.get("arguments")
+            if not isinstance(arguments, dict) or set(arguments) != {
+                "service",
+                "target_version",
+            }:
+                return CallToolResult(
+                    is_error=True,
+                    content=[
+                        TextContent(
+                            type="text",
+                            text="Rollback accepts only service and target_version",
+                        )
+                    ],
+                )
+        return await call_next(ctx)
+
+    server.middleware.append(rollback_arguments_only)
+
     @server.tool(
         annotations=ToolAnnotations(read_only_hint=True, open_world_hint=False),
         structured_output=True,
@@ -37,6 +62,28 @@ def create_server(checkout_base_url: str) -> MCPServer:
             **data,
             "deployment_history": list(reversed(data["deployment_history"][-limit:])),
         }
+
+    @server.tool(
+        annotations=ToolAnnotations(
+            read_only_hint=False,
+            destructive_hint=True,
+            idempotent_hint=True,
+            open_world_hint=False,
+        ),
+        structured_output=True,
+    )
+    async def rollback_deployment(
+        ctx: Context[HTTPBackend],
+        service: Literal["checkout"],
+        target_version: Literal["v1", "v2"],
+    ) -> dict[str, Any]:
+        """Rollback to a previously deployed checkout version; same target is a no-op.
+
+        Internal capability: IncidentOps enforces human approval before invoking it.
+        """
+        return await ctx.request_context.lifespan_context.rollback_deployment(
+            service, target_version
+        )
 
     return server
 
