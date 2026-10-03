@@ -19,6 +19,8 @@ echo ========================================
 set INCIDENTOPS_TEST_DATABASE_URL=postgresql://incidentops_dev:incidentops_dev_only@127.0.0.1:5433/incidentops_test
 set INCIDENTOPS_TEST_INVENTORY_URL=http://127.0.0.1:8001
 set INCIDENTOPS_TEST_CHECKOUT_URL=http://127.0.0.1:8002
+set INCIDENTOPS_TEST_OBSERVABILITY_MCP_URL=http://127.0.0.1:8003/mcp
+set INCIDENTOPS_TEST_OPERATIONS_MCP_URL=http://127.0.0.1:8004/mcp
 
 echo.
 echo ========================================

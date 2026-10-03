@@ -7,10 +7,16 @@ name = "incidentops"
 version = "0.1.0"
 description = "A LangGraph foundation for incident response."
 requires-python = ">=3.11"
-dependencies = ["langgraph", "langgraph-checkpoint-postgres", "psycopg[binary]"]
+dependencies = [
+    "langgraph",
+    "langgraph-checkpoint-postgres",
+    "psycopg[binary]",
+    "mcp>=2,<3",
+    "httpx",
+]
 
 [project.optional-dependencies]
-dev = ["pytest", "ruff", "httpx"]
+dev = ["pytest", "ruff"]
 
 [tool.setuptools.packages.find]
 where = ["src"]

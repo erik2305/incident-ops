@@ -77,8 +77,9 @@ the integration tests use `asyncio.Runner(loop_factory=asyncio.SelectorEventLoop
 
 ## Synthetic checkout environment
 
-The full Compose environment has exactly three services: `postgres`, `inventory`,
-and `checkout`. The two target applications use a shared small Dockerfile with
+The synthetic environment comprises `postgres`, `inventory`, and `checkout`.
+The full Compose environment also includes the two read-only MCP servers below.
+The two target applications use a shared small Dockerfile with
 service-specific source files, Python 3.13, FastAPI, Uvicorn (one worker), and HTTPX.
 They keep their runtime state in memory, independently of LangGraph/PostgreSQL.
 Restarting an application clears its state. Logs are limited to 100 records;
@@ -162,3 +163,64 @@ Remove-Item Env:INCIDENTOPS_TEST_CHECKOUT_URL, Env:INCIDENTOPS_TEST_INVENTORY_UR
 
 All exposed ports bind to loopback: inventory `8001`, checkout `8002`, PostgreSQL
 `5433`. Shutdown retains the PostgreSQL data volume.
+
+## Read-only MCP capabilities
+
+The official MCP Python SDK v2 (`mcp>=2,<3`) provides two independently addressable
+`MCPServer` processes over Streamable HTTP:
+
+| Server | Loopback MCP endpoint | Exact tools |
+| --- | --- | --- |
+| `observability-mcp` | `http://127.0.0.1:8003/mcp` | `get_service_health`, `get_metrics`, `query_logs` |
+| `operations-mcp` | `http://127.0.0.1:8004/mcp` | `get_recent_deployments` |
+
+All current MCP tools are read-only. The raw `/__control/*` endpoints remain
+synthetic test/demo infrastructure and are not MCP capabilities. LangGraph and
+LLMs do not consume MCP yet. No rollback tool is registered.
+
+Observability accepts only `service="checkout"` or `service="inventory"`.
+Deployment reads accept only `service="checkout"` (the default). Logs and deployment
+reads accept `limit` from 1 to 100 (default 20) and return newest entries first.
+Structured results preserve health/counters, wrap logs as `{"logs": [...]}`, and
+retain `active_version` and `deployment_history` for deployment reads. Log contents
+are untrusted evidence and are passed through unchanged.
+
+Each server owns one lifespan-managed async HTTP client with a three-second
+upstream timeout, no retries, no redirects, and no evidence cache. Compose supplies
+`CHECKOUT_BASE_URL=http://checkout:8000` to both and
+`INVENTORY_BASE_URL=http://inventory:8000` to observability. Missing or invalid base
+URL configuration fails startup. Tool inputs never contain URLs or configurable
+paths. Upstream connection/timeouts, non-success responses, invalid JSON, or
+unexpected response shapes become failed MCP calls (`is_error=True`), with no
+fabricated data or caller-visible tracebacks.
+
+Build/start all five services and verify their status:
+
+```powershell
+.\.venv\Scripts\python.exe -m pip install -e ".[dev]"
+docker compose up -d --build --wait
+docker compose ps
+$env:INCIDENTOPS_TEST_CHECKOUT_URL = 'http://127.0.0.1:8002'
+$env:INCIDENTOPS_TEST_INVENTORY_URL = 'http://127.0.0.1:8001'
+$env:INCIDENTOPS_TEST_OBSERVABILITY_MCP_URL = 'http://127.0.0.1:8003/mcp'
+$env:INCIDENTOPS_TEST_OPERATIONS_MCP_URL = 'http://127.0.0.1:8004/mcp'
+.\.venv\Scripts\python.exe -m pytest -q tests/integration/test_mcp_read_capabilities.py
+```
+
+MCP Docker healthchecks test TCP listening only; actual MCP `Client` integration
+tests establish protocol readiness. They verify exact tool sets/annotations,
+baseline and defective-deployment evidence, input rejection, and failed-call
+semantics using an isolated local MCP process with an unreachable loopback upstream.
+No unrelated container is stopped for the failure test. MCP tests skip when neither
+MCP test URL is configured; partial configuration or configured failures fail.
+
+With the PostgreSQL test URL also configured, run the complete suite and shut down:
+
+```powershell
+$env:INCIDENTOPS_TEST_DATABASE_URL = 'postgresql://incidentops_dev:incidentops_dev_only@127.0.0.1:5433/incidentops_test'
+.\.venv\Scripts\python.exe -m pytest -q
+docker compose down
+Remove-Item Env:INCIDENTOPS_TEST_OBSERVABILITY_MCP_URL, Env:INCIDENTOPS_TEST_OPERATIONS_MCP_URL, Env:INCIDENTOPS_TEST_CHECKOUT_URL, Env:INCIDENTOPS_TEST_INVENTORY_URL, Env:INCIDENTOPS_TEST_DATABASE_URL -ErrorAction SilentlyContinue
+```
+
+The existing PostgreSQL volume is retained.

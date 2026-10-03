@@ -7,7 +7,9 @@ Future investigation and operations need clear external capability boundaries.
 
 ## Decision
 V1 uses two logical MCP domains: observability MCP and operations MCP. Runbook
-retrieval stays inside the IncidentOps application.
+retrieval stays inside the IncidentOps application. Both domains use MCP
+Streamable HTTP. Observability exposes health, metrics, and logs; operations
+exposes deployment reads now, with approved mutations reserved for later tasks.
 
 ## Alternatives considered
 One combined MCP domain; a separate runbook MCP server.
@@ -17,5 +19,6 @@ The two domains separate investigation from operational capabilities without
 adding another integration boundary for application-owned runbooks.
 
 ## Consequences
-Later integrations follow these domains and keep runbook retrieval local to the
-application. Task 001 implements no MCP or retrieval code.
+Task 004 exposes only read-only MCP tools backed by synthetic HTTP evidence.
+Raw synthetic controls are not MCP capabilities. Graph integration and runbook
+retrieval remain deferred.
