@@ -3,23 +3,27 @@
 Status: Accepted
 
 ## Context
-Future investigation and operations need clear external capability boundaries.
+Investigation and operations need clear external capability boundaries.
 
 ## Decision
-V1 uses two logical MCP domains: observability MCP and operations MCP. Runbook
-retrieval stays inside the IncidentOps application. Both domains use MCP
-Streamable HTTP. Observability exposes health, metrics, and logs; operations
-exposes deployment reads now, with approved mutations reserved for later tasks.
+V1 uses two logical MCP domains: observability MCP and operations MCP. Both use
+MCP Streamable HTTP. Observability exposes health, metrics, logs and the fixed
+checkout probe; operations exposes deployment reads and checkout rollback.
+The original plan placed future runbook retrieval inside the application rather
+than another MCP server. Final v1 defers runbooks entirely: with one remediation
+type in the synthetic scope, retrieval would be mostly decorative.
 
 ## Alternatives considered
 One combined MCP domain; a separate runbook MCP server.
 
 ## Why
 The two domains separate investigation from operational capabilities without
-adding another integration boundary for application-owned runbooks.
+adding another integration boundary.
 
 ## Consequences
-Task 004 exposes only read-only MCP tools backed by synthetic HTTP evidence.
+Task 004 began with read-only MCP tools backed by synthetic HTTP evidence; later
+work added the guarded rollback and observational probe within the same domains.
 Raw synthetic controls are not MCP capabilities. LangGraph consumes MCP through
 a run-scoped application-side client; connections live in runtime context, never
-checkpoint state. Runbook retrieval remains deferred.
+checkpoint state. The graph enforces exact approval before rollback; tool
+annotations are metadata. Private reset/deploy/fault controls remain outside MCP.

@@ -93,6 +93,22 @@ def save_report(path, data, runs):
     path.with_suffix(".md").write_text(render_report(data), encoding="utf-8")
 
 
+def validate_candidate_provenance(dev, holdout, freeze):
+    if not dev.get("evaluation_id") or dev["evaluation_id"] != freeze.get(
+        "dev_evaluation_id"
+    ):
+        raise ValueError("Candidate DEV evaluation ID does not match holdout freeze")
+    if holdout.get("freeze") != freeze:
+        raise ValueError("Candidate HOLDOUT freeze does not match retained freeze")
+    for data in (dev, holdout):
+        if data.get("model") != freeze.get("model") or data.get(
+            "reasoning_fingerprint"
+        ) != freeze.get("reasoning_fingerprint"):
+            raise ValueError(
+                "Candidate model/reasoning fingerprint differs from freeze"
+            )
+
+
 def candidate_summary(directory: Path):
     dev = json.loads(
         (directory / "live-dev-v1-candidate.json").read_text(encoding="utf-8")
@@ -100,6 +116,8 @@ def candidate_summary(directory: Path):
     holdout = json.loads(
         (directory / "live-holdout-v1-candidate.json").read_text(encoding="utf-8")
     )
+    freeze = json.loads((directory / "holdout-freeze.json").read_text(encoding="utf-8"))
+    validate_candidate_provenance(dev, holdout, freeze)
     runs = [
         RunRecord.model_validate(r) for data in (dev, holdout) for r in data["runs"]
     ]

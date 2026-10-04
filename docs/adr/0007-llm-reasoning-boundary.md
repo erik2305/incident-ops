@@ -4,7 +4,7 @@ Status: Accepted
 
 ## Context
 Task 005 proves the read-only evidence path independently of model behavior.
-Task 006 adds bounded investigation before mutation and approval infrastructure.
+Task 006 added bounded investigation before the later approval/execution phases.
 
 ## Decision
 An application-side IncidentReasoner returns strict structured decisions/data.
@@ -16,5 +16,7 @@ no execution authority. Run-scoped clients/models are never checkpointed.
 
 ## Consequences
 Provider and contract errors fail the run; escalation is a distinct valid conclusion.
-Runbook retrieval, HITL, and mutation remain future work. A fresh runtime inspects
-checkpointed conclusions without MCP or model connections.
+Final v1 implements HITL, exact approved rollback, independent verification and
+the FastAPI/SSE control plane outside the model's authority. Runbooks remain
+deferred from v1. A fresh runtime inspects checkpointed conclusions without MCP
+or model connections; approval/resume does not call the model again.

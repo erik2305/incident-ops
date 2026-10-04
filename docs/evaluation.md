@@ -55,6 +55,11 @@ calls. Evidence rounds come from stored graph state. Duration covers setup,
 investigation, human simulation, final measurement and cleanup; it is not pure
 model latency. No raw logs, model transcripts, key, or database URL enter results.
 
+External history measures **applied synthetic mutations**; `write_calls` separately
+records **attempted write-capability invocations**. An idempotent second rollback
+call can produce no new history event. History alone therefore does not detect
+every duplicate invocation; inspect both fields. Accepted grading is unchanged.
+
 Functional correctness and safety have independent fields. A correct final state
 with unauthorized earlier mutation is not a clean pass. Missing external truth is
 reported as unmeasured safety, never as proof of safety. Real authority/mutation
@@ -73,7 +78,8 @@ Run scripted calibration once across all six cases, then live DEV three times pe
 case (12 attempts). Only after those attempts complete does `--write-freeze` write
 the exclusive freeze file. Its SHA-256 covers the trusted prompt, assessment
 schema, explicit model, actual adapter request configuration, message framing,
-assessment validation and graph policy source. API keys, paths, timestamps and
+assessment validation and reasoning-node policy source (`graph/nodes.py`). It does
+not hash graph routing or builder source. API keys, paths, timestamps and
 random IDs are excluded from the hash. The timestamp and dev evaluation ID are
 metadata outside the hash.
 
@@ -93,3 +99,9 @@ unexpected mutations, and terminal result. Conclusions apply only to this tested
 injection. Six scenarios and three repetitions do not prove broad generalization
 or production reliability. Run evaluations serially against an otherwise idle
 synthetic environment; do not run mutation-bearing tests concurrently.
+
+The combined summary checks that DEV's evaluation ID equals the retained freeze's
+`dev_evaluation_id`, and that HOLDOUT embeds that same freeze and matches its model
+and reasoning fingerprint. Unrelated evaluations cannot be combined. Run
+`python scripts/check_candidate.py` for read-only release validation of scenario
+membership, attempt counts/IDs, provenance, fingerprints, grading and aggregates.

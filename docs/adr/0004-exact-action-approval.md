@@ -23,7 +23,8 @@ from the reviewed proposal.
 
 ## Consequences
 The interrupt node is side-effect-free and safe to re-enter. A fresh runtime may
-resume with write capability only; rejection requires none. MCP annotations are
+resume approval with reads and writes, without a reasoner: execution uses writes
+and subsequent verification uses reads. Rejection requires none. MCP annotations are
 metadata, not the approval mechanism. Fingerprints detect internal payload drift,
 not database-admin tampering. Execution-record guards plus synthetic rollback
 idempotency reduce replay risk without claiming distributed exactly-once execution.

@@ -4,8 +4,10 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "incidentops"
-version = "0.1.0"
-description = "A LangGraph foundation for incident response."
+version = "1.0.0"
+description = "Durable incident investigation with exact human approval and recovery verification."
+license = "MIT"
+license-files = ["LICENSE"]
 requires-python = ">=3.13,<3.14"
 dependencies = [
     "langgraph>=1.2.12,<2",
@@ -32,7 +34,10 @@ where = ["src"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-markers = ["integration: requires explicitly configured external test services"]
+markers = [
+    "integration: requires explicitly configured external test services",
+    "live_llm: requires a paid live OpenRouter model call",
+]
 
 [tool.ruff]
 target-version = "py311"

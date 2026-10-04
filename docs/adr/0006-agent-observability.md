@@ -1,20 +1,24 @@
 # ADR-006 — Agent observability
 
-Status: Accepted
+Status: Accepted; amended for v1 release
 
 ## Context
-V1 will need visibility into graph execution and model reasoning.
+Graph execution needs inspectable evidence and workflow state.
 
 ## Decision
-LangSmith is the primary tracing approach for v1. OpenTelemetry is outside the MVP.
+The initial decision selected LangSmith as the intended tracing approach.
+The v1 release amendment defers LangSmith tracing: no tracing stack is required
+for v1. OpenTelemetry remains outside the MVP.
 
 ## Alternatives considered
 OpenTelemetry; custom tracing infrastructure.
 
 ## Why
-Selecting one primary tracing approach keeps the initial observability scope
-focused on agent execution.
+The initial choice avoided competing tracing stacks. Final v1 relies on durable
+workflow state, bounded API events, evaluator counters and retained results, which
+are sufficient for the portfolio scope without a tracing integration.
 
 ## Consequences
-Tracing integration is deferred. Task 001 adds no tracing setup or explicit
-LangSmith SDK dependency; LangGraph may supply its own transitive dependencies.
+LangSmith and OpenTelemetry instrumentation are deferred. No tracing setup,
+service, credentials or explicit tracing dependency is required. Existing framework
+dependencies may transitively include their libraries; this is not an integration.

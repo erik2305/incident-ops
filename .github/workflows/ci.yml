@@ -1,0 +1,64 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+env:
+  PYTHON_DOTENV_DISABLED: "1"
+
+jobs:
+  quality:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.13"
+      - run: python -m pip install -c constraints.txt -e ".[dev]"
+      - run: python -m ruff check .
+      - run: python -m ruff format --check .
+      - name: Unit suite
+        run: python -m pytest tests/unit -q --basetemp=.pytest-tmp-ci-unit -o cache_dir=.pytest-tmp-ci-unit-cache --junitxml=.pytest-tmp-ci-unit/results.xml
+      - name: Refuse runtime skips
+        run: python scripts/check_ci_results.py pytest .pytest-tmp-ci-unit/results.xml
+      - name: Retained candidate integrity
+        run: python scripts/check_candidate.py
+
+  integration:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    env:
+      INCIDENTOPS_TEST_DATABASE_URL: postgresql://incidentops_dev:incidentops_dev_only@127.0.0.1:5433/incidentops_test
+      INCIDENTOPS_DATABASE_URL: postgresql://incidentops_dev:incidentops_dev_only@127.0.0.1:5433/incidentops_test
+      INCIDENTOPS_TEST_INVENTORY_URL: http://127.0.0.1:8001
+      INCIDENTOPS_TEST_CHECKOUT_URL: http://127.0.0.1:8002
+      INCIDENTOPS_TEST_OBSERVABILITY_MCP_URL: http://127.0.0.1:8003/mcp
+      INCIDENTOPS_TEST_OPERATIONS_MCP_URL: http://127.0.0.1:8004/mcp
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.13"
+      - run: python -m pip install -c constraints.txt -e ".[dev]"
+      - run: docker compose up -d --build --wait
+      - run: python -m incidentops.api.setup
+      - name: All non-live integrations, sequentially
+        run: python -m pytest tests/integration -m "not live_llm" -q --basetemp=.pytest-tmp-ci-integration -o cache_dir=.pytest-tmp-ci-integration-cache --junitxml=.pytest-tmp-ci-integration/results.xml
+      - name: Refuse runtime skips
+        run: python scripts/check_ci_results.py pytest .pytest-tmp-ci-integration/results.xml
+      - name: Real scripted evaluation
+        run: python -m incidentops.evaluation --provider scripted --split all --runs 1 --output .pytest-tmp-ci-evaluation
+      - name: Verify scripted results
+        run: python scripts/check_ci_results.py scripted .pytest-tmp-ci-evaluation/scripted-v1-candidate.json
+      - name: Stop Compose and retain PostgreSQL volume
+        if: always()
+        run: docker compose down

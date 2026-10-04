@@ -3,7 +3,7 @@
 Status: Accepted
 
 ## Context
-Incident investigation may eventually require operational changes.
+Incident investigation can require operational changes.
 
 ## Decision
 The model may propose a mutation as structured data. Only a deterministic executor
@@ -16,5 +16,7 @@ Expose mutating tools directly to the model; allow automatic execution.
 Separating proposals from execution establishes an explicit human control boundary.
 
 ## Consequences
-Future model capabilities remain read-only. Mutation and approval implementation
-are deferred; Task 001 adds neither.
+Task 001 deferred mutation and approval. Final v1 implements a deterministic,
+approval-bound checkout rollback executor. The model has no executable tools;
+it emits validated advisory read requests and proposals. A fresh runtime resumes
+the exact persisted action without a reasoner, then independently verifies recovery.

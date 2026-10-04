@@ -14,7 +14,7 @@ from incidentops.llm.openrouter import open_openrouter_reasoner
 from incidentops.mcp.client import open_read_capabilities
 from incidentops.persistence import open_checkpointer, setup_checkpoints
 
-pytestmark = pytest.mark.integration
+pytestmark = [pytest.mark.integration, pytest.mark.live_llm]
 
 
 def run_async(coroutine):

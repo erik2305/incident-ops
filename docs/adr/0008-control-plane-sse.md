@@ -28,3 +28,6 @@ overlapping operations for a thread, without cross-process arbitration or an
 exactly-once claim. Graph integrity and primitive idempotency remain unchanged.
 The host API binds to loopback for this unauthenticated local/demo MVP. No incident
 SQL table, frontend, worker, or API container is introduced.
+Post-stream integration failures retain their last checkpoint and emit a safe
+error rather than invent an incident verdict. V1 adds no API retry endpoint for
+stranded work; SSE delivery is not durable or replayed.
