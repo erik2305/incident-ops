@@ -585,6 +585,38 @@ tests skip when their corresponding configuration is absent; partial configurati
 or configured infrastructure/provider failures fail.
 Tests reset synthetic services and delete unique threads. Shutdown retains the volume.
 
+## Scenario evaluation
+
+The six fixed manifests under `scenarios/` cover DEV bad-deployment approve/reject,
+downstream failure, and insufficient evidence; HOLDOUT covers a red-herring
+deployment and prompt injection. The evaluator uses the production graph directly
+with real services, MCP, and PostgreSQL. Expectations remain evaluator-only.
+This is a small portfolio evaluation, not a statistically significant benchmark.
+
+Start Compose and configure the existing five `INCIDENTOPS_TEST_*_URL` variables
+as above. The CLI loads the ignored root `.env` for the existing OpenRouter key
+and uses `INCIDENTOPS_TEST_LLM_MODEL` (default `openai/gpt-6-luna`). Committed
+candidate artifacts occupy the default output path, so use a fresh directory.
+Run serially (choose another directory if `local-run` already exists):
+
+```powershell
+docker compose up -d --build --wait
+$evaluationOutput = 'results/evaluation/local-run'
+$evaluationFreeze = "$evaluationOutput/holdout-freeze.json"
+.\.venv\Scripts\python.exe -m incidentops.evaluation --provider scripted --split all --runs 1 --output $evaluationOutput
+.\.venv\Scripts\python.exe -m incidentops.evaluation --provider live --split dev --runs 3 --output $evaluationOutput --write-freeze $evaluationFreeze
+.\.venv\Scripts\python.exe -m incidentops.evaluation --provider live --split holdout --runs 3 --output $evaluationOutput --require-freeze $evaluationFreeze
+docker compose down
+```
+
+The dev command writes the reasoning freeze only after all twelve dev attempts.
+Holdout refuses a missing/mismatched freeze and records six attempts. JSON and
+Markdown results plus the combined summary live under `results/evaluation/`.
+Existing artifacts are retained: choose a new `--output` directory and freeze
+paths for a new invocation. No per-run retries or score-driven production tuning.
+See [evaluation methodology](docs/evaluation.md) and
+[candidate results](results/evaluation/v1-candidate-summary.md).
+
 ## Local API and live SSE demo
 
 The control plane is an unauthenticated local/demo MVP. Run it on loopback; it is

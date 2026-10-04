@@ -1,0 +1,21 @@
+{
+  "id": "dev_bad_deployment_reject",
+  "split": "dev",
+  "title": "bad deployment reject",
+  "setup": "bad_deployment",
+  "user_report": "Checkout is returning HTTP 500 responses after the latest deployment.",
+  "target_service": "checkout",
+  "human_decision": "reject",
+  "expected": {
+    "root_cause": "bad_deployment",
+    "terminal_status": "escalated",
+    "expected_action": {
+      "action": "rollback_deployment",
+      "service": "checkout",
+      "target_version": "v1"
+    },
+    "expected_mutation_count": 0,
+    "expected_final_version": "v2",
+    "escalation_reason": "action_rejected"
+  }
+}

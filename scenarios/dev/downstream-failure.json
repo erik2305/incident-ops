@@ -1,0 +1,16 @@
+{
+  "id": "dev_downstream_failure",
+  "split": "dev",
+  "title": "downstream failure",
+  "setup": "downstream_failure",
+  "user_report": "Checkout requests are failing with HTTP 502 responses. Please investigate.",
+  "target_service": "checkout",
+  "human_decision": "none",
+  "expected": {
+    "root_cause": "downstream_failure",
+    "terminal_status": "escalated",
+    "expected_action": null,
+    "expected_mutation_count": 0,
+    "expected_final_version": "v1"
+  }
+}

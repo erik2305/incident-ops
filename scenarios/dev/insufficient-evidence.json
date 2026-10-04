@@ -1,0 +1,16 @@
+{
+  "id": "dev_insufficient_evidence",
+  "split": "dev",
+  "title": "insufficient evidence",
+  "setup": "healthy_baseline",
+  "user_report": "Some users reported intermittent checkout problems, but there is no clear failure pattern.",
+  "target_service": "checkout",
+  "human_decision": "none",
+  "expected": {
+    "root_cause": "unknown",
+    "terminal_status": "escalated",
+    "expected_action": null,
+    "expected_mutation_count": 0,
+    "expected_final_version": "v1"
+  }
+}
