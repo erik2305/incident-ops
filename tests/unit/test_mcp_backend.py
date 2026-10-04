@@ -25,7 +25,7 @@ def test_invalid_essential_configuration_fails_before_startup(url):
         ("health", httpx.Response(200, json={})),
         ("probe", httpx.Response(200, content=b"not JSON")),
         ("probe", httpx.Response(200, json={})),
-        ("probe", httpx.Response(503, json={"detail": "Probe inventory unavailable"})),
+        ("probe", httpx.Response(503, json={"detail": "Probe unavailable"})),
         (
             "metrics",
             httpx.Response(200, json={"requests_total": True, "requests_5xx": 0}),

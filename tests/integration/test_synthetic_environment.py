@@ -66,6 +66,45 @@ def structured_keys(value):
     return set()
 
 
+def test_inventory_fault_observed_as_checkout_downstream_failure_and_reset(services):
+    checkout, inventory = services
+    assert checkout.post("/checkout", json=ORDER).status_code == 200
+    checkout.post("/__control/deploy", json={"version": "v2"}).raise_for_status()
+    assert checkout.post("/checkout", json=ORDER).status_code == 500
+    inventory.post("/__control/fault", json={"mode": "unavailable"}).raise_for_status()
+    assert inventory.get("/__ops/health").json()["status"] == "healthy"
+    assert inventory.get("/inventory/SKU-001").status_code == 503
+    assert checkout.post("/checkout", json=ORDER).status_code == 502
+    before = [
+        get_json(client, f"/__ops/{endpoint}")
+        for client in (checkout, inventory)
+        for endpoint in ("metrics", "logs")
+    ]
+    probe = checkout.get("/__ops/probe")
+    assert probe.status_code == 200
+    assert probe.json() == {"service": "checkout", "ok": False, "observed_status": 502}
+    assert [
+        get_json(client, f"/__ops/{endpoint}")
+        for client in (checkout, inventory)
+        for endpoint in ("metrics", "logs")
+    ] == before
+    facts = [
+        get_json(client, f"/__ops/{endpoint}")
+        for client in (checkout, inventory)
+        for endpoint in ("health", "metrics", "logs")
+    ]
+    assert not structured_keys(facts) & {
+        "fault_mode",
+        "root_cause",
+        "expected_action",
+        "inventory_is_intentionally_broken",
+    }
+    reset_services(checkout, inventory)
+    assert_baseline(checkout, inventory)
+    assert inventory.get("/__ops/probe-stock").status_code == 200
+    assert checkout.post("/checkout", json=ORDER).status_code == 200
+
+
 def test_bad_deployment_failure_evidence_and_recovery(services):
     checkout, inventory = services
     assert_baseline(checkout, inventory)

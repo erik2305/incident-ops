@@ -19,11 +19,23 @@ Start the five Compose services before using those URLs. Pytest loads the root
 `.env`; application callers still inject configuration explicitly. The real `.env`
 is excluded from Git and Docker images; the example contains no real secret.
 
-Create and activate a Python 3.11+ virtual environment, then install:
+Create and activate a Python 3.13 virtual environment, then install:
 
 ```text
 python -m pip install -e ".[dev]"
 ```
+
+For the exact verified dependency versions (Python 3.13.15), install with the
+root constraints file instead:
+
+```powershell
+.\.venv\Scripts\python.exe -m pip install -c constraints.txt -e ".[dev]"
+```
+
+`pyproject.toml` retains supported dependency ranges; `constraints.txt` records
+the installed project runtime/dev dependency closure, excluding the editable
+project and installer. Both synthetic and MCP Docker builds use these constraints.
+Only Python 3.13 is currently verified.
 
 Run verification from the repository root:
 
@@ -33,6 +45,12 @@ python -m ruff check .
 python -m ruff format --check .
 git diff --check
 ```
+
+On Windows, `scripts\verify.cmd` starts/rebuilds Compose, supplies the five test
+URLs and explicit live model, runs the complete suite, Ruff, and Git whitespace
+checks. Pytest loads the ignored root `.env` for the OpenRouter key. The script
+leaves Compose running; finish with `docker compose down` to retain the PostgreSQL
+volume.
 
 The accepted test harness loads the ignored root `.env` using python-dotenv.
 If it contains an OpenRouter key, supply the full live model/infrastructure
@@ -489,12 +507,40 @@ or process health result can establish recovery.
 Checkout's fixed `GET /__ops/probe` uses SKU-001 and quantity 1. It shares
 `calculate_checkout` with `POST /checkout`, makes a real HTTP inventory call, and
 runs the same version-dependent price calculation. Inventory's private fixed
-`GET /__ops/probe-stock` shares `stock_for` with its business endpoint and suppresses
+`GET /__ops/probe-stock` shares inventory response logic with its business endpoint and suppresses
 ordinary traffic recording. Neither service's request/error counters or business
 logs change during a probe. The actual v2 missing-price-field defect yields a
-valid observed status 500; v1 computes successfully. No version-to-health oracle
-exists. Inventory transport/HTTP/malformed-contract failures cause raw probe HTTP
-503 and hence an MCP tool/capability error, rather than `ok=false`.
+valid observed status 500; v1 computes successfully. Inventory dependency failure
+produces observed checkout status 502. In each case the raw checkout probe returns
+HTTP 200 with `{service, ok, observed_status}` because it successfully observed
+business behavior. A downstream failure is valid negative evidence, including
+after a successful rollback. No version-to-health oracle exists. An unreachable
+checkout probe, timeout, malformed probe response, or protocol/schema failure
+still raises an MCP/tool or `ReadCapabilityError` and supplies no recovery verdict.
+
+Inventory has one private synthetic fault control, with a strict body containing
+only `mode`, either `normal` or `unavailable`:
+
+```powershell
+Invoke-RestMethod -Method Post -Uri http://127.0.0.1:8001/__control/fault -ContentType application/json -Body '{"mode":"unavailable"}'
+# Clear the fault and reset ordinary inventory counters/logs.
+Invoke-RestMethod -Method Post -Uri http://127.0.0.1:8001/__control/reset
+```
+
+While unavailable, ordinary inventory access and the fixed observational stock
+path return HTTP 503; inventory process health remains healthy. Checkout makes a
+real HTTP dependency call and returns business HTTP 502, distinct from the v2
+defect's HTTP 500 with normal inventory. Probes preserve both services' counters,
+logs, and deployment history. Agent-facing observability exposes operational facts
+without fault mode or scenario/root-cause labels. Reset restores normal behavior.
+
+`test_negative_verification.py` proves the real PostgreSQL/MCP/service lifecycle:
+runtime A interrupts with the exact rollback proposal; fresh runtime B approves,
+rolls back once, and finishes `escalated/verification_failed` with deployment
+matching v1 but probe `false/502`; runtime C restores those records without MCP
+or a reasoner. `test_postgres_verification_retry.py` separately proves that a fresh
+read-only runtime can retry failed verification after execution is checkpointed,
+without another rollback. The positive durable test still proves recovery to v1.
 
 Only after both valid observations does verification publish its plain
 `verification_result`: action ID, approved target, deployment match, probe status,

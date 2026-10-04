@@ -178,16 +178,12 @@ async def checkout(payload: CheckoutInput, request: Request):
 async def probe(request: Request):
     state = request.app.state
     async with state.lock:
-        status, _, event, _ = await calculate_checkout(
+        status, _, _, _ = await calculate_checkout(
             state,
             CheckoutInput(sku="SKU-001", quantity=1),
             state.active_version,
             observational=True,
         )
-        if event == "downstream_error":
-            return JSONResponse(
-                {"detail": "Probe inventory unavailable"}, status_code=503
-            )
         return {"service": "checkout", "ok": status == 200, "observed_status": status}
 
 

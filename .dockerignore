@@ -1,5 +1,6 @@
 .git/
 .venv/
+.venv-task010-repro/
 **/__pycache__/
 **/*.py[cod]
 **/*.egg-info/

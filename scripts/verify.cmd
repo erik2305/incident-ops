@@ -28,7 +28,8 @@ echo ========================================
 echo [3/6] Running tests
 echo ========================================
 
-".venv\Scripts\python.exe" -m pytest -q -rs
+rem pytest loads the root .env without printing its key; a blank key skips live LLM.
+".venv\Scripts\python.exe" -m pytest -q -rs --basetemp=.pytest-tmp-verify -o cache_dir=.pytest-tmp-verify-cache
 if errorlevel 1 goto :fail
 
 echo.

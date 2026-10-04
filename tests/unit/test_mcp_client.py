@@ -16,7 +16,7 @@ from incidentops.mcp.client import (
 )
 
 
-@pytest.mark.parametrize(("ok", "status"), [(True, 200), (False, 500)])
+@pytest.mark.parametrize(("ok", "status"), [(True, 200), (False, 500), (False, 502)])
 def test_probe_success_uses_empty_arguments_and_observability_only(ok, status):
     data = {"service": "checkout", "ok": ok, "observed_status": status}
     obs = SimpleNamespace(

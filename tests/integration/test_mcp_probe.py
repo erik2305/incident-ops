@@ -31,6 +31,30 @@ def business_evidence(client):
     return [client.get(f"/__ops/{endpoint}").json() for endpoint in ("metrics", "logs")]
 
 
+def test_inventory_fault_is_successful_negative_mcp_observation_without_traffic(
+    probe_environment,
+):
+    env, checkout, inventory = probe_environment
+    inventory.post("/__control/fault", json={"mode": "unavailable"}).raise_for_status()
+    before = [business_evidence(client) for client in (checkout, inventory)]
+    history = checkout.get("/__ops/deployments").json()
+
+    async def verify():
+        async with Client(env["observability"], cache=None) as client:
+            for _ in range(2):
+                result = await client.call_tool("probe_checkout", {})
+                assert not result.is_error
+                assert result.structured_content == {
+                    "service": "checkout",
+                    "ok": False,
+                    "observed_status": 502,
+                }
+
+    asyncio.run(verify())
+    assert [business_evidence(client) for client in (checkout, inventory)] == before
+    assert checkout.get("/__ops/deployments").json() == history
+
+
 def test_real_probe_observes_v2_failure_then_v1_recovery_without_traffic(
     probe_environment,
 ):

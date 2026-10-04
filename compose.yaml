@@ -17,7 +17,8 @@ services:
 
   inventory:
     build:
-      context: ./services
+      context: .
+      dockerfile: services/Dockerfile
       args:
         SERVICE: inventory
     ports:
@@ -29,7 +30,8 @@ services:
       retries: 30
   checkout:
     build:
-      context: ./services
+      context: .
+      dockerfile: services/Dockerfile
       args:
         SERVICE: checkout
     environment:
